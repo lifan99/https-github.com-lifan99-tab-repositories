@@ -1,0 +1,25 @@
+# Local credentials; only the credential-free template is tracked.
+.env
+.env.*
+!.env.example
+
+# Python environments, caches, and build outputs.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Local working files and desktop metadata.
+.tmp/
+.DS_Store
+Thumbs.db
+~$*.docx
