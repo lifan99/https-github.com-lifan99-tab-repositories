@@ -1,10 +1,15 @@
-from unittest.mock import Mock
+import json
+from unittest.mock import AsyncMock, Mock
 import pytest
 from review_system.workflow import WorkflowError, run_review
 
 def test_critic_callback_failure():
-    client = Mock()
-    client.complete.side_effect = ["A", "C", "J"]
+    client = Mock(complete=AsyncMock())
+    judge_text = json.dumps({
+        "summary": "Synthetic review", "verdict": "pass", "findings": [],
+        "limitations": ["Offline teaching example."],
+    })
+    client.complete.side_effect = ["A", "C", judge_text]
     original_error = RuntimeError("private-detail")
     callback = Mock(side_effect=[None, original_error])
     with pytest.raises(WorkflowError) as caught:

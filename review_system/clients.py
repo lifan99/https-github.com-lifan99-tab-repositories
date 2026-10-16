@@ -1,10 +1,12 @@
 """OpenAI-compatible chat transport, independent of the review workflow."""
 
-from http.client import HTTPException
 import json
+from http.client import HTTPException
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import httpx
 
 from .config import Settings
 
@@ -12,12 +14,55 @@ from .config import Settings
 class LLMError(RuntimeError):
     """A model call failed or returned an unusable response."""
 
+    def __init__(self, message: str, *, code: str = "model_error"):
+        super().__init__(message)
+        self.code = code
+
 
 class LLMClient(Protocol):
     def complete(self, *, model: str, messages: list[dict[str, str]]) -> str: ...
 
 
+class AsyncLLMClient(Protocol):
+    async def complete(self, *, model: str, messages: list[dict[str, str]]) -> str: ...
+
+
+class AsyncOpenAICompatibleClient:
+    """Borrow a shared HTTP client; the creator owns its lifetime."""
+
+    def __init__(self, settings: Settings, http_client: httpx.AsyncClient):
+        self.settings = settings
+        self.http_client = http_client
+
+    async def complete(self, *, model: str, messages: list[dict[str, str]]) -> str:
+        try:
+            response = await self.http_client.post(
+                f"{self.settings.base_url}/chat/completions",
+                json={"model": model, "messages": messages, "stream": False},
+                headers={"Authorization": f"Bearer {self.settings.api_key}"},
+                timeout=self.settings.timeout_seconds,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            content = payload["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise LLMError("The provider returned empty or non-text content.")
+            return content
+        except httpx.HTTPStatusError as exc:
+            raise LLMError(f"Provider request failed (HTTP {exc.response.status_code}).") from exc
+        except httpx.TimeoutException as exc:
+            raise LLMError("Provider request timed out.", code="network_timeout") from exc
+        except httpx.ConnectError as exc:
+            raise LLMError("Could not connect to the model provider.") from exc
+        except httpx.RequestError as exc:
+            raise LLMError("Provider connection was interrupted.") from exc
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise LLMError("The provider returned an invalid chat response.") from exc
+
+
 class OpenAICompatibleClient:
+    """Legacy synchronous transport retained for HTTP teaching exercises."""
     def __init__(self, settings: Settings):
         self.settings = settings
 

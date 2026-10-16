@@ -1,8 +1,8 @@
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from review_system.clients import LLMError
 from review_system.workflow import WorkflowError, run_review
 
-client = Mock()
+client = Mock(complete=AsyncMock())
 client.complete.side_effect = ["A", LLMError("synthetic failure")]
 
 try:

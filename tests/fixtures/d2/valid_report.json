@@ -1,0 +1,16 @@
+{
+  "summary": "原文的历史保留承诺缺少持久化或恢复机制支持。",
+  "verdict": "needs_revision",
+  "findings": [
+    {
+      "category": "logic",
+      "severity": "high",
+      "message": "仅用进程内存不能支持重启后仍保留历史的承诺。",
+      "suggestion": "限定为当前运行期间保存，或另行设计和验证恢复机制。",
+      "start": 9,
+      "end": 16,
+      "quote": "重启后历史仍在"
+    }
+  ],
+  "limitations": ["仅评估输入文字，未运行服务或检查实现。"]
+}

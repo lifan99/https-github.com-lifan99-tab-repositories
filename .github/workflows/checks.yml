@@ -1,0 +1,38 @@
+name: Offline checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-py312-linux.txt
+      - name: Install
+        run: python -m pip install -r requirements-py312-linux.txt -e '.[test,dev]'
+      - name: Lint, regressions, classroom and HTTP exercises
+        run: python scripts/check.py
+      - name: Local HTTP and UI smoke tests (fake only)
+        env:
+          PYTHONPATH: .
+        run: |
+          python docs/day-04/examples/E03_local_http_smoke.py
+          python docs/day-05/examples/E01_ui_http_smoke.py
+          python scripts/smoke_restart.py

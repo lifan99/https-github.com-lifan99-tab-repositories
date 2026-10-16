@@ -1,0 +1,55 @@
+{
+  "request_id": "test-id",
+  "review_id": "00000000-0000-4000-8000-000000000001",
+  "execution_mode": "fake",
+  "responses": [
+    {
+      "agent": "Analyst",
+      "model": "a",
+      "content": "[fake] Analyst 演示回答；未评估真实材料。"
+    },
+    {
+      "agent": "Critic",
+      "model": "c",
+      "content": "[fake] Critic 演示回答；未评估真实材料。"
+    },
+    {
+      "agent": "Judge",
+      "model": "j",
+      "content": "{\"summary\": \"离线演示报告：未调用真实模型，不能据此判断材料质量。\", \"verdict\": \"insufficient_evidence\", \"findings\": [], \"limitations\": [\"固定 fake 输出，仅验证程序链路，未进行实际审核或外部核验。\"]}"
+    }
+  ],
+  "stages": [
+    {
+      "agent": "Analyst",
+      "model": "a",
+      "status": "succeeded",
+      "error_code": null,
+      "raw_output": "[fake] Analyst 演示回答；未评估真实材料。"
+    },
+    {
+      "agent": "Critic",
+      "model": "c",
+      "status": "succeeded",
+      "error_code": null,
+      "raw_output": "[fake] Critic 演示回答；未评估真实材料。"
+    },
+    {
+      "agent": "Judge",
+      "model": "j",
+      "status": "succeeded",
+      "error_code": null,
+      "raw_output": "{\"summary\": \"离线演示报告：未调用真实模型，不能据此判断材料质量。\", \"verdict\": \"insufficient_evidence\", \"findings\": [], \"limitations\": [\"固定 fake 输出，仅验证程序链路，未进行实际审核或外部核验。\"]}"
+    }
+  ],
+  "status": "succeeded",
+  "final_review": {
+    "summary": "离线演示报告：未调用真实模型，不能据此判断材料质量。",
+    "verdict": "insufficient_evidence",
+    "findings": [],
+    "limitations": [
+      "固定 fake 输出，仅验证程序链路，未进行实际审核或外部核验。"
+    ]
+  },
+  "error": null
+}

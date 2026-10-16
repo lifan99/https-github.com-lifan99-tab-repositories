@@ -1,6 +1,6 @@
+import json
 from http.client import BadStatusLine, IncompleteRead
 from io import BytesIO
-import json
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler
