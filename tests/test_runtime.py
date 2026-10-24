@@ -1,3 +1,5 @@
+"""运行资源回归：确认模型超时或调用方取消后，运行入口关闭自己创建的 HTTP 客户端。"""
+
 import asyncio
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ from review_system.workflow import WorkflowError
 
 @pytest.mark.parametrize("cancel", [False, True])
 def test_owned_http_client_closes_after_timeout_or_cancellation(cancel):
+    """预算到期或外部取消后，请求完成清理且运行入口关闭自有客户端。"""
     async def scenario():
         entered = asyncio.Event()
         cleaned = asyncio.Event()

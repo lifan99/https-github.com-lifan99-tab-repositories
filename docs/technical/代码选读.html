@@ -1,0 +1,238 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>多 Agent 审核系统：代码选读</title><style>html { color-scheme: light dark; }
+body { margin: 0 auto; padding: 1.4em 1.1em 4em; max-width: 35em;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 1.125em; line-height: 1.95; color: #26313b; background: #f7f8fa;
+  overflow-wrap: anywhere; word-break: normal; }
+h1, h2, h3 { line-height: 1.5; font-weight: 600; text-align: left; }
+h1 { font-size: 1.65em; margin: 1.8em 0 1em; }
+h2 { font-size: 1.35em; margin-top: 2em; }
+h3 { font-size: 1.12em; }
+p { margin: 0 0 1.15em; orphans: 2; widows: 2; }
+a { color: #1d4ed8; text-underline-offset: .2em; }
+code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: .86em; overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  padding: .85em; border: 1px solid #cbd5e1; border-radius: .4em; line-height: 1.7; }
+blockquote { margin: 1.5em 0; padding-left: 1em; border-left: 3px solid #94a3b8; }
+blockquote p { margin: 0; }
+ul, ol { padding-left: 1.45em; }
+li { margin-bottom: .7em; }
+.meta, .chapter-nav { font-size: .8em; color: #526071; }
+.chapter-nav { display: flex; flex-wrap: wrap; gap: 1.4em; margin: 2em 0; }
+.chapter { border-top: 1px solid #cbd5e1; margin-top: 3em; padding-top: 1em; }
+.cover { min-height: 65vh; display: flex; flex-direction: column; justify-content: center; }
+summary { cursor: pointer; padding: .7em 0; font-weight: 600; }
+@media (min-width: 600px) { body { padding: 2em 1.8em 5em; font-size: 1.25em; } }
+@media (prefers-color-scheme: dark) {
+  body { background: #151a23; color: #d7deea; }
+  a { color: #94bfff; } .meta, .chapter-nav { color: #a6b2c3; }
+  pre, .chapter { border-color: #3b4657; }
+}
+@media print { body { color: #222; background: white; } .chapter-nav { display: none; } }
+
+.table-cards { margin: 1em 0 1.5em; }
+.table-card { margin: 0 0 .8em; padding: .8em 1em;
+  border: 1px solid #cbd5e1; border-radius: .4em; }
+.table-card dt { font-size: .85em; font-weight: 600; color: #526071; }
+.table-card dd { margin: .15em 0 .7em; }
+.table-card dd:last-child { margin-bottom: 0; }
+pre code { font-size: .88em; }
+@media (prefers-color-scheme: dark) {
+  .table-card { border-color: #3b4657; }
+  .table-card dt { color: #a6b2c3; }
+}
+</style></head><body><header><p class="meta">项目技术文档 · 手机阅读版</p><h1>多 Agent 审核系统：代码选读</h1><p class="meta">9 个源码阅读环节 · 离线示例与自测答案 · 依据 2026-10-19 本地源码</p><p>从角色与上下文读到模型调用、报告校验、失败处理和测试，每次可读一至两节。片段供阅读，不能覆盖源码；带省略内容的片段不是独立程序。运行示例须在电脑上的 mvp 项目根目录执行。仓库链接显示为文件名，便于离线查阅。</p><p class="meta">可按主题分次阅读，无需同时操作电脑。字号可用浏览器缩放调整；深浅色跟随系统设置。</p></header><details id="contents"><summary>展开文档目录</summary><ol><li><a href="#chapter-01">阅读路线</a></li>
+<li><a href="#chapter-02">1. 角色是配置对象</a></li>
+<li><a href="#chapter-03">2. 一份字典怎样串起三次调用</a></li>
+<li><a href="#chapter-04">3. 工作流依赖接口，客户端负责网络</a></li>
+<li><a href="#chapter-05">4. 保留原文，再校验 Judge 的引用</a></li>
+<li><a href="#chapter-06">5. 原始输出、有效回答、最终报告是三层数据</a></li>
+<li><a href="#chapter-07">6. 不联网观察一次完整流程</a></li>
+<li><a href="#chapter-08">7. 从一条测试反向读懂实现</a></li>
+<li><a href="#chapter-09">8. 进阶选读：预算、等待与取消</a></li>
+<li><a href="#chapter-10">9. 扩展选读：从页面追到模型</a></li>
+<li><a href="#chapter-11">读完后，用五句话复述</a></li></ol></details><main><section class="chapter" id="chapter-01"><h2>阅读路线</h2><p>先追踪一份材料怎样经过三个角色，再看 HTTP 服务和页面。前三节可以先把 <code>await</code> 理解成“等待这次异步调用返回”；第八节再阅读时间预算与取消。</p>
+<div class="table-cards"><dl class="table-card"><dt>顺序</dt><dd>1</dd><dt>文件与定位名称</dt><dd><code>agents.py</code>：<code>Agent</code>、三个角色常量</dd><dt>这次要弄清的问题</dt><dd>一个角色在程序里是什么？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>2</dd><dt>文件与定位名称</dt><dd><code>workflow.py</code>：<code>run_review_async</code> 中的 <code>context</code></dd><dt>这次要弄清的问题</dt><dd>后一个角色怎样得到前面的回答？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>3</dd><dt>文件与定位名称</dt><dd><code>clients.py</code>：<code>AsyncLLMClient</code>、<code>complete</code></dd><dt>这次要弄清的问题</dt><dd>网络调用怎样与审核流程分开？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>4</dd><dt>文件与定位名称</dt><dd><code>contracts.py</code>：<code>ReviewRequest</code>、<code>_finding</code></dd><dt>这次要弄清的问题</dt><dd>输入与报告为什么需要程序校验？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>5</dd><dt>文件与定位名称</dt><dd><code>workflow.py</code>：<code>snapshot</code>、<code>stop</code></dd><dt>这次要弄清的问题</dt><dd>失败后还留下哪些结果？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>6</dd><dt>文件与定位名称</dt><dd><code>fakes.py</code> 与 <code>workflow.py</code>：同步入口</dd><dt>这次要弄清的问题</dt><dd>怎样不联网跑一次完整流程？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>7</dd><dt>文件与定位名称</dt><dd><code>tests/test_workflow.py</code></dd><dt>这次要弄清的问题</dt><dd>测试怎样证明角色顺序与材料传递？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>8</dd><dt>文件与定位名称</dt><dd><code>workflow.py</code>：截止时间与取消分支</dd><dt>这次要弄清的问题</dt><dd>异步运行为什么需要多层预算？</dd></dl><dl class="table-card"><dt>顺序</dt><dd>9</dd><dt>文件与定位名称</dt><dd><code>api.py</code>、<code>service.py</code>、<code>app.py</code></dd><dt>这次要弄清的问题</dt><dd>页面到模型之间还有哪些边界？</dd></dl></div>
+<p>源码链接放在各节开头。用编辑器搜索表中的名称，比依赖容易变化的行号更方便。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-02">下一章</a></nav></section>
+<section class="chapter" id="chapter-02"><h2>1. 角色是配置对象</h2><p>打开 agents.py（<code>agents.py</code>），先读 <code>Agent</code>，再读 <code>ANALYST</code>、<code>CRITIC</code>、<code>JUDGE</code> 的提示词。</p>
+<pre><code>@dataclass(frozen=True)
+class Agent:
+    &quot;&quot;&quot;不可变的角色配置；角色名称用于状态记录，提示词用于模型的 system 消息。&quot;&quot;&quot;
+    name: str
+    system_prompt: str</code></pre>
+<p><code>dataclass</code> 帮忙生成初始化等方法。<code>Agent</code> 对象保存角色名称和系统提示词，<code>frozen=True</code> 限制字段被重新赋值。定义这个类、创建三个对象，都没有发送模型请求。</p>
+<p>Analyst 的提示词要求做初步分析；Critic 要求对照原文质疑初审；Judge 要求综合判断并返回严格 JSON。共同的 <code>MODE_GUIDANCE</code> 说明 <code>logic</code>、<code>evidence</code> 两种关注方向，以及只使用给定材料的边界。</p>
+<p>模型名称不在 <code>Agent</code> 中。它由配置传入工作流，所以三个角色可以使用同一个模型，也可以分别配置模型。独立提示词形成角色分工，审核内容是否可靠仍需评估。</p>
+<p><strong>阅读问题：</strong> 删除 <code>CRITIC</code> 的定义，会自动变成两角色流程吗？</p>
+<p><strong>对照答案：</strong> 不会。工作流还显式引用 <code>CRITIC</code>，角色顺序与结果结构也有相应约束。角色定义和流程调度需要一起理解。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-01">上一章</a><a href="#chapter-03">下一章</a></nav></section>
+<section class="chapter" id="chapter-03"><h2>2. 一份字典怎样串起三次调用</h2><p>打开 workflow.py（<code>workflow.py</code>），在 <code>run_review_async</code> 中依次搜索 <code>assignments</code>、<code>context =</code>、<code>messages =</code>、<code>context[f</code>。</p>
+<p>初始化节选：</p>
+<pre><code>assignments = ((ANALYST, analyst_model), (CRITIC, critic_model), (JUDGE, judge_model))
+stages = [StageRecord(agent.name, model) for agent, model in assignments]
+completed: list[AgentResponse] = []
+context = {&quot;original_input&quot;: request.original_input, &quot;review_mode&quot;: request.review_mode}</code></pre>
+<p><code>assignments</code> 固定角色顺序，并把每个角色与模型名配对。<code>stages</code> 保存阶段记录，<code>completed</code> 保存已经接收的有效回答，<code>context</code> 保存下一次模型调用需要的材料。</p>
+<p>循环中的消息构造节选：</p>
+<pre><code>messages = [
+    {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: agent.system_prompt},
+    {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: json.dumps(context, ensure_ascii=False)},
+]</code></pre>
+<p><code>messages</code> 是列表，里面有两份字典。第一份说明角色职责；第二份把本次审核上下文转成 JSON 字符串。<code>ensure_ascii=False</code> 让中文按中文输出。</p>
+<p>回答接收部分的节选：</p>
+<pre><code>response = AgentResponse(agent.name, model, content)
+completed.append(response)
+context[f&quot;{agent.name.lower()}_output&quot;] = content</code></pre>
+<p><code>AgentResponse</code> 保存“谁、使用哪个模型、回答了什么”。<code>append</code> 把对象加入列表；最后一行把回答写入上下文字典。运行到 Analyst 时，键名是 <code>analyst_output</code>；运行到 Critic 时，键名是 <code>critic_output</code>。</p>
+<div class="table-cards"><dl class="table-card"><dt>即将调用的角色</dt><dd>Analyst</dd><dt>此时 <code>context</code> 中的键</dt><dd><code>original_input</code>、<code>review_mode</code></dd></dl><dl class="table-card"><dt>即将调用的角色</dt><dd>Critic</dd><dt>此时 <code>context</code> 中的键</dt><dd>上述两项，加 <code>analyst_output</code></dd></dl><dl class="table-card"><dt>即将调用的角色</dt><dd>Judge</dd><dt>此时 <code>context</code> 中的键</dt><dd>上述三项，加 <code>critic_output</code></dd></dl></div>
+<p>每轮都重新执行 <code>json.dumps</code>，所以本轮消息包含前面刚写入的回答。三个角色按循环顺序等待，后一个角色不会提前启动。同一函数每次运行都新建这些局部容器。</p>
+<p><strong>阅读问题：</strong> 如果把 <code>messages</code> 的构造移到循环外，只做一次，Critic 还能看到 Analyst 的回答吗？</p>
+<p><strong>对照答案：</strong> 不能依靠后续修改 <code>context</code> 自动更新。<code>json.dumps</code> 已经生成了独立字符串，字典后来新增字段不会改变那段字符串。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-02">上一章</a><a href="#chapter-04">下一章</a></nav></section>
+<section class="chapter" id="chapter-04"><h2>3. 工作流依赖接口，客户端负责网络</h2><p>打开 clients.py（<code>clients.py</code>），先读 <code>AsyncLLMClient</code>，再读 <code>AsyncOpenAICompatibleClient.complete</code>。</p>
+<pre><code>class AsyncLLMClient(Protocol):
+    &quot;&quot;&quot;异步工作流依赖的最小接口；真实客户端与离线替身均可实现。&quot;&quot;&quot;
+    async def complete(self, *, model: str, messages: list[dict[str, str]]) -&gt; str: ...</code></pre>
+<p>工作流需要的能力是：给出模型名和消息，异步得到文本。<code>*</code> 后面的参数必须用关键字传入，例如 <code>complete(model=..., messages=...)</code>。这里的 <code>...</code> 是协议的方法占位，具体行为由传入的客户端实现。</p>
+<p>真实客户端中的请求节选：</p>
+<pre><code>response = await self.http_client.post(
+    f&quot;{self.settings.base_url}/chat/completions&quot;,
+    json={&quot;model&quot;: model, &quot;messages&quot;: messages, &quot;stream&quot;: False},
+    headers={&quot;Authorization&quot;: f&quot;Bearer {self.settings.api_key}&quot;},
+    timeout=self.settings.timeout_seconds,
+    # 禁止跟随重定向，避免将认证信息发送到其他地址。
+    follow_redirects=False,
+)
+response.raise_for_status()
+payload = response.json()
+content = payload[&quot;choices&quot;][0][&quot;message&quot;][&quot;content&quot;]</code></pre>
+<p>先发送 HTTP 请求，再检查状态码，再解析 JSON，最后取出第一份回答。HTTP 200 仅表示请求成功，不能保证正文一定包含有效回答，所以后续仍检查 <code>content</code> 的类型和空白。</p>
+<p>该方法把 HTTP、连接、超时或响应格式异常转换为 <code>LLMError</code>。其中网络超时使用 <code>network_timeout</code> 错误码。工作流据此保存阶段失败状态，无需自己理解供应商的响应结构。</p>
+<p>配置来源见 config.py（<code>config.py</code>） 的 <code>Settings.from_env</code>：选择 Qwen 或 DeepSeek，读取对应环境变量，再应用角色模型覆盖值。密钥通过环境配置传入；不要把真实密钥复制到示例或笔记中。</p>
+<p><strong>阅读问题：</strong> <code>DemoClient</code> 没有继承 <code>AsyncLLMClient</code>，为什么也能传给工作流？</p>
+<p><strong>对照答案：</strong> 它提供了工作流需要的异步 <code>complete</code> 方法。<code>Protocol</code> 描述接口形状，不要求实现类必须显式继承；类型标注本身也不会代替运行时校验。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-03">上一章</a><a href="#chapter-05">下一章</a></nav></section>
+<section class="chapter" id="chapter-05"><h2>4. 保留原文，再校验 Judge 的引用</h2><p>打开 contracts.py（<code>contracts.py</code>），选读 <code>ReviewRequest.__post_init__</code>、<code>_finding</code>、<code>parse_final_review</code>。</p>
+<p>输入校验只用 <code>strip()</code> 判断是否全为空白，不把清理后的文本写回 <code>original_input</code>。这是因为报告中的位置必须对应用户提交的原文。</p>
+<p><code>_finding</code> 的坐标与引用校验节选：</p>
+<pre><code>start, end = value[&quot;start&quot;], value[&quot;end&quot;]
+for field, coordinate in ((&quot;start&quot;, start), (&quot;end&quot;, end)):
+    # bool 也是 int 的子类，必须用精确类型比较拒绝布尔坐标。
+    if type(coordinate) is not int:
+        raise ContractError(f&quot;{path}.{field}: must be an integer, not a boolean.&quot;)
+if not 0 &lt;= start &lt; end &lt;= len(original_input):
+    raise ContractError(f&quot;{path}.start/end: invalid quote range.&quot;)
+quote = _text(value[&quot;quote&quot;], f&quot;{path}.quote&quot;)
+# 按 Unicode 码点切片核对；不能使用 UTF-8 字节位置，也不能先清理原文。
+if original_input[start:end] != quote:
+    raise ContractError(f&quot;{path}.quote: must match original_input[start:end].&quot;)</code></pre>
+<p><code>start</code> 包含在引用内，<code>end</code> 不包含。例如原文 <code>&quot;甲乙丙&quot;</code> 中，<code>[1:3]</code> 得到 <code>&quot;乙丙&quot;</code>。这里按 Python 字符串的 Unicode 码点定位，不能用 UTF-8 字节偏移代替。</p>
+<p><code>type(coordinate) is not int</code> 还处理了一个 Python 细节：<code>isinstance(True, int)</code> 为真，而布尔值不应被接受为引用坐标。</p>
+<p><code>parse_final_review</code> 继续检查完整报告：字段必须精确匹配，拒绝重复键和非标准数值常量，并检查跨字段关系。例如 <code>needs_revision</code> 至少需要一条 finding；<code>pass</code> 不能带高严重度问题；<code>insufficient_evidence</code> 需要限制说明。</p>
+<p><strong>阅读问题：</strong> 报告通过校验，能否证明模型指出的问题在事实层面正确？</p>
+<p><strong>对照答案：</strong> 只能证明报告满足程序约定，包括引用确实对应原文。判断是否合理、有无漏报，还需要对照材料和人工评价。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-04">上一章</a><a href="#chapter-06">下一章</a></nav></section>
+<section class="chapter" id="chapter-06"><h2>5. 原始输出、有效回答、最终报告是三层数据</h2><p>继续读 workflow.py（<code>workflow.py</code>） 的模型返回处理、<code>snapshot</code> 和 <code>stop</code>。</p>
+<p>输出处理节选，省略了中间保存快照等语句：</p>
+<pre><code>if isinstance(content, str):
+    stages[index] = replace(stages[index], raw_output=content)
+    snapshot(&quot;running&quot;)
+if not isinstance(content, str) or not content.strip():
+    raise LLMError(&quot;The model returned empty or non-text content.&quot;)
+if agent is JUDGE:
+    final_review = parse_final_review(content, request.original_input)</code></pre>
+<p>文本先进入阶段的 <code>raw_output</code>。Judge 的文本还要通过报告校验，之后才会被加入 <code>completed</code>。因此 Judge 返回非法 JSON 时，它的原始文本仍可排查，但有效回答列表只保留 Analyst 和 Critic。</p>
+<p><code>snapshot</code> 的核心是重新创建记录：</p>
+<pre><code>run.record = ReviewRecord(request, tuple(stages), report, status, error_code)
+run.responses = tuple(completed)</code></pre>
+<p>阶段记录与报告使用冻结数据类，集合用元组保存。<code>replace</code> 创建新的阶段对象；新的快照发布后，之前取得的快照不会被后续阶段状态修改。<code>ReviewRun</code> 本身是运行句柄，持有的是最近一次快照。</p>
+<div class="table-cards"><dl class="table-card"><dt>情况</dt><dd>全部完成</dd><dt>阶段状态</dt><dd>succeeded / succeeded / succeeded</dd><dt>有效回答</dt><dd>三份</dd><dt><code>record.final_review</code></dt><dd>已校验报告</dd></dl><dl class="table-card"><dt>情况</dt><dd>Critic 模型调用失败</dd><dt>阶段状态</dt><dd>succeeded / failed / skipped</dd><dt>有效回答</dt><dd>Analyst</dd><dt><code>record.final_review</code></dt><dd><code>None</code></dd></dl><dl class="table-card"><dt>情况</dt><dd>Judge 格式非法</dd><dt>阶段状态</dt><dd>succeeded / succeeded / failed</dd><dt>有效回答</dt><dd>Analyst、Critic</dd><dt><code>record.final_review</code></dt><dd><code>None</code></dd></dl></div>
+<p>还有一个顺序需要读清：有效回答先进入快照，再执行 <code>on_response</code> 回调，回调完成并通过截止时间检查后，阶段才标为成功。因此回调失败时，可以出现“已有当前回答，但当前阶段失败”的情况。</p>
+<p>最终报告只在全部阶段、回调和最后截止时间检查通过后发布。<code>WorkflowError</code> 携带失败角色、有效回答和最后记录，便于上层展示部分结果。</p>
+<p><strong>阅读问题：</strong> Critic 失败以后，为什么不让 Judge 用现有材料继续？</p>
+<p><strong>对照答案：</strong> 当前流程约定 Judge 读取原文和前两份回答。程序选择停止后续阶段，以保留明确的失败语义。改变这一行为需要重新设计流程和测试。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-05">上一章</a><a href="#chapter-07">下一章</a></nav></section>
+<section class="chapter" id="chapter-07"><h2>6. 不联网观察一次完整流程</h2><p>先读 fakes.py（<code>fakes.py</code>） 的 <code>DemoClient.complete</code>，再读 workflow.py（<code>workflow.py</code>） 文件末尾的 <code>run_review</code>。</p>
+<p><code>DemoClient</code> 通过上下文中的键识别当前阶段，返回固定文字与固定报告。它不调用供应商，也不判断材料质量。<code>run_review</code> 则通过 <code>asyncio.run</code> 调用同一个异步内核，供普通同步脚本使用。</p>
+<p>以下是可运行的独立阅读示例：</p>
+<pre><code>.venv/bin/python - &lt;&lt;&#x27;PY&#x27;
+from review_system.fakes import DemoClient
+from review_system.workflow import run_review
+
+result = run_review(
+    &quot;仅用内存保存记录，重启后历史仍在。&quot;,
+    DemoClient(),
+    analyst_model=&quot;demo-a&quot;,
+    critic_model=&quot;demo-c&quot;,
+    judge_model=&quot;demo-j&quot;,
+)
+
+for response in result.responses:
+    print(response.agent, response.model, response.content)
+print(&quot;运行状态：&quot;, result.record.status)
+print(&quot;报告结论：&quot;, result.record.final_review.verdict)
+PY</code></pre>
+<p>预期依次打印 Analyst、Critic、Judge，运行状态为 <code>succeeded</code>，报告结论为 <code>insufficient_evidence</code>。这两个值并不矛盾：前者表示程序完成流程，后者是演示报告的业务结论。</p>
+<p>需要观察每轮上下文时运行现有 追踪脚本（<code>E05_project_trace.py</code>）：</p>
+<pre><code>.venv/bin/python examples/core/E05_project_trace.py</code></pre>
+<p><strong>阅读问题：</strong> 在一个已经运行的异步函数里应该怎样调用审核？</p>
+<p><strong>对照答案：</strong> 使用 <code>await run_review_async(...)</code>。同步入口有 <code>ensure_sync_context</code> 检查，防止在运行中的事件循环里嵌套 <code>asyncio.run</code>。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-06">上一章</a><a href="#chapter-08">下一章</a></nav></section>
+<section class="chapter" id="chapter-08"><h2>7. 从一条测试反向读懂实现</h2><p>打开 test_workflow.py（<code>test_workflow.py</code>），选读 <code>test_order_context_prompts_and_final_response</code>。</p>
+<p>测试准备与调用节选：</p>
+<pre><code>client = Mock(complete=AsyncMock())
+client.complete.side_effect = [&quot;Analysis&quot;, &quot;Critique&quot;, JUDGE_TEXT]
+callback = Mock()
+
+result = run_review(&quot;Original proposal&quot;, client, **MODELS, on_response=callback)</code></pre>
+<p><code>AsyncMock</code> 模拟可以被 <code>await</code> 的方法。这里的 <code>side_effect</code> 列表让三次调用依次返回预置结果。<code>JUDGE_TEXT</code> 是测试文件顶部定义的合法报告 JSON，<code>**MODELS</code> 将字典展开为三个模型参数。</p>
+<p>验证节选：</p>
+<pre><code>assert [r.agent for r in result.responses] == [&quot;Analyst&quot;, &quot;Critic&quot;, &quot;Judge&quot;]
+assert result.final_response == JUDGE_TEXT
+assert result.record.final_review.verdict == &quot;pass&quot;
+calls = [call.kwargs for call in client.complete.call_args_list]
+assert [call[&quot;model&quot;] for call in calls] == list(MODELS.values())
+assert len({call[&quot;messages&quot;][0][&quot;content&quot;] for call in calls}) == 3</code></pre>
+<p>第一条断言检查角色顺序；后两项关于报告的断言分别核对原始 JSON 文本和解析后的结论。最后一条用集合统计系统提示词种类，应有三个不同值。</p>
+<p>继续往下读同一测试中对 <code>json.loads(...)</code> 的断言：它核对每次实际传给客户端的上下文字段。这比只断言“调用了三次”更能证明 Critic 和 Judge 收到了应有的材料。</p>
+<p>再选读两条失败测试：</p>
+<ul>
+<li><code>test_failure_stops_workflow_and_preserves_completed_outputs</code>：任何角色失败后停止，保存此前回答。</li>
+<li><code>test_judge_contract_failure_retains_raw_output_but_does_not_publish</code>：保存 Judge 原始输出，但不发布非法报告。</li>
+</ul>
+<p>可以只运行这些测试，再运行默认回归：</p>
+<pre><code>.venv/bin/python -m pytest tests/test_workflow.py -q
+.venv/bin/python -m pytest -q</code></pre>
+<p><strong>阅读问题：</strong> 这些固定回答测试能证明真实 Qwen 或 DeepSeek 的审核质量吗？</p>
+<p><strong>对照答案：</strong> 能证明流程和数据边界符合断言。供应商连接和模型内容质量需要另外验证，不能由替身测试推断。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-07">上一章</a><a href="#chapter-09">下一章</a></nav></section>
+<section class="chapter" id="chapter-09"><h2>8. 进阶选读：预算、等待与取消</h2><p>打开 workflow.py（<code>workflow.py</code>） 的 <code>_model_call</code>、<code>check_deadline</code> 和异常处理分支；对照 test_async_workflow.py（<code>test_async_workflow.py</code>）。</p>
+<p>固定总截止时间的节选：</p>
+<pre><code>deadline = loop.time() + total_timeout_seconds
+if total_deadline is not None:
+    deadline = min(deadline, total_deadline)</code></pre>
+<p><code>loop.time()</code> 使用单调时钟，适合计算耗时。截止时间在一次审核中保持不变；切换角色、等到名额后，都不能重新获得一份完整总预算。外部传来的 <code>total_deadline</code> 可以进一步缩短预算。</p>
+<div class="table-cards"><dl class="table-card"><dt>预算</dt><dd>网络操作超时</dd><dt>对应配置字段</dt><dd><code>timeout_seconds</code></dd><dt>控制范围</dt><dd>HTTP 客户端的连接、读取等操作等待</dd></dl><dl class="table-card"><dt>预算</dt><dd>单模型预算</dd><dt>对应配置字段</dt><dd><code>model_timeout_seconds</code></dd><dt>控制范围</dt><dd>一次 <code>complete</code> 调用</dd></dl><dl class="table-card"><dt>预算</dt><dd>整次审核预算</dd><dt>对应配置字段</dt><dd><code>total_timeout_seconds</code></dd><dt>控制范围</dt><dd>排队、三阶段调用、同步回调等总体耗时</dd></dl></div>
+<p><code>asyncio.timeout_at</code> 用取消机制中断异步等待。同步代码阻塞事件循环时，取消无法立即运行，所以源码在关键位置还显式检查截止时间，拒绝已经过期的结果。</p>
+<p>取消处理节选：</p>
+<pre><code>except asyncio.CancelledError:
+    stop(&quot;cancelled&quot;, RuntimeError(&quot;Review cancelled.&quot;))
+    raise</code></pre>
+<p>先保存取消状态，再向上继续传播取消信号。上层才能完成任务清理，而调用方仍可通过运行句柄读取最后快照。</p>
+<p>重点测试名称：<code>test_model_and_total_deadlines_preserve_partial_results</code>、<code>test_total_budget_is_not_restarted_after_analyst</code>、<code>test_queue_timeout_or_cancel_never_calls_model_or_releases_unowned_slot</code>。</p>
+<p><strong>阅读问题：</strong> 工作流支持信号量等待，是否说明 HTTP 服务满载后也一定排队？</p>
+<p><strong>对照答案：</strong> 不能这样推断。直接调用工作流时可传入 <code>slots</code> 等待名额；HTTP 服务另有准入检查，当前容量满时拒绝新请求。需要继续读服务边界。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-08">上一章</a><a href="#chapter-10">下一章</a></nav></section>
+<section class="chapter" id="chapter-10"><h2>9. 扩展选读：从页面追到模型</h2><p>读懂内核后，再按下列顺序追踪完整应用：</p>
+<pre><code>app.py                         输入、提交与会话展示
+  → api_client.py              访问本地审核 API
+    → api.py                   校验 HTTP 输入、调用服务、组装响应
+      → service.py             请求准入、任务管理与关闭
+        → workflow.py          三角色顺序与审核状态
+          → clients.py         访问模型供应商</code></pre>
+<div class="table-cards"><dl class="table-card"><dt>源码</dt><dd>app.py（<code>app.py</code>）</dd><dt>建议先搜索</dt><dd><code>submit_review</code>、<code>display_record</code></dd><dt>读这一处的目的</dt><dd>提交结果如何写入会话，并在页面重跑时展示</dd></dl><dl class="table-card"><dt>源码</dt><dd>api_client.py（<code>api_client.py</code>）</dd><dt>建议先搜索</dt><dd><code>ReviewAPIClient.review</code></dd><dt>读这一处的目的</dt><dd>页面发什么请求、怎样验证返回结构</dd></dl><dl class="table-card"><dt>源码</dt><dd>api.py（<code>api.py</code>）</dd><dt>建议先搜索</dt><dd><code>create_app</code>、内部的 <code>review</code></dd><dt>读这一处的目的</dt><dd>HTTP 路由怎样把输入交给服务</dd></dl><dl class="table-card"><dt>源码</dt><dd>service.py（<code>service.py</code>）</dd><dt>建议先搜索</dt><dd><code>ReviewService.review</code>、<code>_execute</code>、<code>aclose</code></dd><dt>读这一处的目的</dt><dd>怎样限制活动审核、执行与清理任务</dd></dl><dl class="table-card"><dt>源码</dt><dd>api_models.py（<code>api_models.py</code>）</dd><dt>建议先搜索</dt><dd><code>ReviewBody</code>、<code>SuccessResponse</code>、<code>FailureResponse</code></dd><dt>读这一处的目的</dt><dd>对外请求和响应有哪些字段</dd></dl></div>
+<p>注意两份客户端的目标不同：<code>api_client.py</code> 访问本地审核服务，<code>clients.py</code> 访问模型供应商。</p>
+<p>当前页面等待整次 HTTP 审核完成后展示结果，未提供逐阶段推送。内核的 <code>on_response</code> 回调可供直接调用者使用；仅有回调不意味着页面正在实时接收回答。</p>
+<p><code>api.py</code> 的 <code>default_resources</code> 负责显式选择 <code>live</code> 或 <code>fake</code>。真实配置错误会阻止启动，不会自动换成演示回答。应用生命周期结束时先关闭服务任务，再退出共享 HTTP 客户端资源上下文。</p>
+<p><strong>阅读问题：</strong> 当前 <code>request_id</code> 能否保证服务重启后重发请求不会再次执行？</p>
+<p><strong>对照答案：</strong> 不能。当前只对执行中的重复请求做检查，尚无持久化幂等记录；请求完成或服务重启后不能依靠它避免再次调用模型。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-09">上一章</a><a href="#chapter-11">下一章</a></nav></section>
+<section class="chapter" id="chapter-11"><h2>读完后，用五句话复述</h2><ol>
+<li>三个角色由独立系统提示词定义，调用顺序由工作流固定。</li>
+<li>每轮重新序列化上下文，保留原文并逐步加入前序回答。</li>
+<li>客户端把模型通信封装成异步 <code>complete</code>，所以工作流也能使用离线替身。</li>
+<li>Judge 的原始文本只有通过契约校验和完整流程检查后，才成为可发布的最终报告。</li>
+<li>失败、超时或取消会保留快照；测试通过固定回答与异常检查这些程序行为。</li>
+</ol>
+<p>复述不清楚时，回到相应源码核对“输入是什么、状态写在哪里、失败后返回什么”。需要进一步解释 Python 语法时查基础课程 <code>~/ai-engineering/learning/python/语法与用法.md</code>，需要完整主题说明时查 源码详解（<code>源码详解.md</code>） 或 项目技术阅读（<code>项目技术阅读.md</code>）。</p><nav class="chapter-nav" aria-label="章节导航"><a href="#contents">回到目录</a><a href="#chapter-10">上一章</a></nav></section></main></body></html>

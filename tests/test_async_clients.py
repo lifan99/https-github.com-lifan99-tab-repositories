@@ -1,3 +1,5 @@
+"""异步模型传输回归：通过 MockTransport 模拟响应、故障、取消及响应流清理。"""
+
 import asyncio
 import json
 
@@ -11,6 +13,7 @@ SETTINGS = Settings("qwen", "https://example.invalid/v1", "synthetic-key", "m", 
 
 
 def test_async_request_contract_and_borrowed_client_lifetime():
+    """核验异步请求字段、原文空白和操作超时，且不提前关闭共享客户端。"""
     async def scenario():
         seen = []
 
@@ -38,6 +41,7 @@ def test_async_request_contract_and_borrowed_client_lifetime():
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308, 401, 429, 503])
 def test_status_errors_never_follow_redirect_or_expose_body(status):
+    """状态错误及重定向只产生一次请求，错误消息不包含供应商正文。"""
     async def scenario():
         seen = []
 
@@ -68,6 +72,7 @@ def test_status_errors_never_follow_redirect_or_expose_body(status):
     (httpx.RemoteProtocolError, "model_error", "interrupted"),
 ])
 def test_transport_error_classification(error_type, code, message):
+    """各类连接、读写及连接池异常映射为稳定错误码。"""
     async def scenario():
         def handle(request):
             raise error_type("synthetic-private", request=request)
@@ -86,6 +91,7 @@ def test_transport_error_classification(error_type, code, message):
     b'{"choices":[{"message":{"content":" "}}]}',
 ])
 def test_bad_response_content(body):
+    """非法 JSON、缺失字段和空白回答均视为模型响应失败。"""
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body))) as http:
             with pytest.raises(LLMError):
@@ -95,6 +101,7 @@ def test_bad_response_content(body):
 
 
 def test_cancelled_transport_cleans_up_without_closing_shared_client():
+    """取消传播到请求并完成清理，但共享客户端保持打开。"""
     async def scenario():
         entered, cleaned = asyncio.Event(), asyncio.Event()
 
@@ -123,6 +130,7 @@ def test_cancelled_transport_cleans_up_without_closing_shared_client():
 
 
 def test_cancellation_during_response_body_read_closes_stream():
+    """读取响应正文时取消会关闭该响应流，避免资源泄漏。"""
     async def scenario():
         entered, closed = asyncio.Event(), asyncio.Event()
 

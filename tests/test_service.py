@@ -1,3 +1,5 @@
+"""服务准入回归：用事件控制并发时序，验证去重、容量恢复、任务收集和截止时间传递。"""
+
 import asyncio
 import json
 from unittest.mock import patch
@@ -13,6 +15,7 @@ SETTINGS = Settings("fake", "https://example.invalid", "", "m", "a", "c", "j")
 
 
 def execute(scenario):
+    """为异步服务场景添加总等待上限，避免并发测试死锁。"""
     async def bounded():
         async with asyncio.timeout(5):
             await scenario()
@@ -20,6 +23,7 @@ def execute(scenario):
 
 
 class ControlledClient(DemoClient):
+    """用独立事件控制每份审核的开始、放行和清理，精确验证并发时序。"""
     def __init__(self):
         self.entered = {name: asyncio.Event() for name in ("R1", "R2", "R3")}
         self.release = {name: asyncio.Event() for name in self.entered}
@@ -42,6 +46,7 @@ class ControlledClient(DemoClient):
 
 
 def test_admission_conflict_capacity_cancel_recovery_and_reuse():
+    """检查重复标识优先、满载拒绝、取消后恢复及已完成标识复用。"""
     async def scenario():
         client = ControlledClient()
         service = ReviewService(client, SETTINGS)
@@ -80,6 +85,7 @@ def test_admission_conflict_capacity_cancel_recovery_and_reuse():
 
 
 def test_failure_releases_own_id_without_interrupting_peer():
+    """失败只释放本次标识和名额，不影响其他审核。"""
     async def scenario():
         client = ControlledClient()
         client.fail.add("R1")
@@ -105,7 +111,38 @@ def test_failure_releases_own_id_without_interrupting_peer():
     execute(scenario)
 
 
+@pytest.mark.parametrize("error", [RuntimeError("private-log-error"), asyncio.CancelledError()])
+def test_admission_event_failure_releases_id_and_preserves_peer(error):
+    """准入后的事件记录异常或取消也释放登记，不中断独立审核。"""
+    async def scenario():
+        client = ControlledClient()
+        service = ReviewService(client, SETTINGS)
+        peer = asyncio.create_task(service.review("id2", "R2"))
+        try:
+            await client.entered["R2"].wait()
+            expected = asyncio.CancelledError if isinstance(error, asyncio.CancelledError) else ServiceError
+            with patch("review_system.service.log_event", side_effect=[error, None]):
+                with pytest.raises(expected) as caught:
+                    await service.review("id1", "R1")
+            if isinstance(caught.value, ServiceError):
+                assert caught.value.code == "internal_error"
+                assert caught.value.__cause__ is error
+            assert service.active_count == service.task_count == 1
+            assert client.calls == [("R2", "a")]
+            assert not peer.done()
+            client.release["R1"].set()
+            assert (await service.review("id1", "R1")).result.record.status == "succeeded"
+            client.release["R2"].set()
+            assert (await peer).result.record.status == "succeeded"
+            assert service.active_count == service.task_count == 0
+        finally:
+            await service.aclose()
+            await asyncio.gather(peer, return_exceptions=True)
+    execute(scenario)
+
+
 def test_close_collects_tasks_before_resource_owner_closes_client():
+    """关闭服务先等待子任务清理，且后续新请求被拒绝。"""
     async def scenario():
         client = ControlledClient()
         service = ReviewService(client, SETTINGS)
@@ -124,12 +161,13 @@ def test_close_collects_tasks_before_resource_owner_closes_client():
 
 
 def test_parent_cancel_before_child_starts_leaves_no_registration():
+    """父任务在子任务第一步前被取消，也不残留任务或活动标识。"""
     async def scenario():
         client = ControlledClient()
         service = ReviewService(client, SETTINGS)
         parent = asyncio.create_task(service.review("id1", "R1"))
-        # The parent schedules its child, then this callback cancels the parent
-        # before the child gets its first event-loop step.
+        # 父任务创建子任务后，这个回调会先取消父任务；
+        # 此时子任务尚未获得第一次执行机会，用于覆盖最早发生的取消。
         asyncio.get_running_loop().call_soon(parent.cancel)
         with pytest.raises(asyncio.CancelledError):
             await parent
@@ -142,6 +180,7 @@ def test_parent_cancel_before_child_starts_leaves_no_registration():
 
 
 def test_service_passes_original_deadline_through_scheduling_delay():
+    """调度延迟计入原始总预算，不因子任务稍后开始而延长。"""
     async def scenario():
         settings = Settings("fake", "https://example.invalid", "", "m", "a", "c", "j", total_timeout_seconds=0.01)
         client = ControlledClient()
@@ -164,6 +203,7 @@ def test_service_passes_original_deadline_through_scheduling_delay():
 
 @pytest.mark.parametrize("identifier", ["", "has space", "非ASCII", "x" * 65, 1, None, "a\n"])
 def test_invalid_service_id_never_calls_model(identifier):
+    """非法请求标识在创建模型调用或活动登记前被拒绝。"""
     async def scenario():
         client = ControlledClient()
         service = ReviewService(client, SETTINGS)

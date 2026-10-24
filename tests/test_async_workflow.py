@@ -1,3 +1,5 @@
+"""异步审核内核回归：覆盖并发隔离、排队、预算、取消和不可变进度快照。"""
+
 import asyncio
 import json
 import time
@@ -14,12 +16,14 @@ MODELS = dict(analyst_model="a", critic_model="c", judge_model="j")
 
 
 def output(model, original):
+    """非 Judge 阶段返回可追踪文本，Judge 阶段生成符合契约的固定报告。"""
     if model != "j":
         return f"{model}:{original}"
     return json.dumps({"summary": original, "verdict": "pass", "findings": [], "limitations": []})
 
 
 def execute(scenario):
+    """为异步测试场景提供事件循环和防止死锁的总等待上限。"""
     async def bounded():
         async with asyncio.timeout(5):
             await scenario()
@@ -27,6 +31,7 @@ def execute(scenario):
 
 
 async def cleanup(tasks):
+    """取消尚未结束的任务，并收集所有结果，避免异常或任务遗留到后续测试。"""
     for task in tasks:
         if not task.done():
             task.cancel()
@@ -34,6 +39,7 @@ async def cleanup(tasks):
 
 
 def test_two_reviews_overlap_third_queues_and_contexts_stay_isolated():
+    """两份审核重叠执行，第三份排队；各自上下文和报告保持独立。"""
     async def scenario():
         slots = asyncio.Semaphore(2)
         release = asyncio.Event()
@@ -65,7 +71,7 @@ def test_two_reviews_overlap_third_queues_and_contexts_stay_isolated():
                 tasks.append(asyncio.create_task(run_review_async(name, client, **MODELS, slots=slots, run=runs[name])))
             await asyncio.gather(entered["R1"].wait(), entered["R2"].wait())
             tasks.append(asyncio.create_task(run_review_async("R3", client, **MODELS, slots=slots, run=runs["R3"])))
-            await asyncio.sleep(0)  # Give the newly scheduled task a chance to reach its queue.
+            await asyncio.sleep(0)  # 让新任务运行到等待名额的位置，再检查排队状态。
             assert runs["R3"].record.status == "queued"
             assert not entered["R3"].is_set()
             assert peak == 2
@@ -90,6 +96,7 @@ def test_two_reviews_overlap_third_queues_and_contexts_stay_isolated():
     (0.02, 2, "model_timeout"), (2, 0.02, "total_timeout"), (0.02, 0.02, "total_timeout"),
 ])
 def test_model_and_total_deadlines_preserve_partial_results(model_seconds, total_seconds, code):
+    """单次或总预算到期都保留已完成回答，并正确标记失败及跳过阶段。"""
     async def scenario():
         cleaned = asyncio.Event()
         run = ReviewRun()
@@ -123,6 +130,7 @@ def test_model_and_total_deadlines_preserve_partial_results(model_seconds, total
 
 
 def test_total_budget_is_not_restarted_after_analyst():
+    """角色切换沿用同一总截止时间，不能在 Analyst 之后重置预算。"""
     async def scenario():
         calls = []
 
@@ -147,6 +155,7 @@ def test_total_budget_is_not_restarted_after_analyst():
 
 @pytest.mark.parametrize("cancel", [False, True])
 def test_queue_timeout_or_cancel_never_calls_model_or_releases_unowned_slot(cancel):
+    """排队超时或取消不调用模型，也不能释放其他任务持有的名额。"""
     async def scenario():
         slots = asyncio.Semaphore(1)
         await slots.acquire()
@@ -175,7 +184,7 @@ def test_queue_timeout_or_cancel_never_calls_model_or_releases_unowned_slot(canc
             assert slots.locked()
             slots.release()
             await slots.acquire()
-            assert slots.locked()  # There is still exactly one slot.
+            assert slots.locked()  # 重新获取后仍锁定，证明没有错误地增加名额。
             slots.release()
         finally:
             await cleanup([task])
@@ -184,6 +193,7 @@ def test_queue_timeout_or_cancel_never_calls_model_or_releases_unowned_slot(canc
 
 
 def test_cancel_one_review_then_peer_and_new_review_use_shared_http_client():
+    """取消一个审核后，其他审核及新审核仍可复用共享 HTTP 客户端。"""
     async def scenario():
         settings = Settings("qwen", "https://example.invalid/v1", "synthetic-key", "m", "a", "c", "j")
         entered, cleaned = asyncio.Event(), asyncio.Event()
@@ -236,6 +246,7 @@ def test_cancel_one_review_then_peer_and_new_review_use_shared_http_client():
 
 
 def test_failure_does_not_cancel_independent_peer():
+    """单份审核失败不取消并行执行的独立审核。"""
     async def scenario():
         gate = asyncio.Event()
         both_entered = asyncio.Event()
@@ -274,6 +285,7 @@ def test_failure_does_not_cancel_independent_peer():
     (TimeoutError("unrelated private timeout"), "model_error"),
 ])
 def test_error_is_not_mislabeled_as_timer_expiry(error, expected):
+    """网络超时与业务自行抛出的 TimeoutError 不误标为模型预算到期。"""
     async def scenario():
         with pytest.raises(WorkflowError) as caught:
             await run_review_async("Input", Mock(complete=AsyncMock(side_effect=error)), **MODELS)
@@ -285,6 +297,7 @@ def test_error_is_not_mislabeled_as_timer_expiry(error, expected):
 @pytest.mark.parametrize("field", ["model_timeout_seconds", "total_timeout_seconds"])
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, "5"])
 def test_invalid_budgets_do_not_start_models(field, value):
+    """非法预算在创建执行快照或调用模型前被拒绝。"""
     async def scenario():
         client = Mock(complete=AsyncMock())
         run = ReviewRun()
@@ -296,13 +309,14 @@ def test_invalid_budgets_do_not_start_models(field, value):
 
 
 def test_callback_overruns_total_budget_cannot_publish_final_report():
+    """同步回调阻塞超过总预算时，即使 Judge 已返回也不能发布报告。"""
     async def scenario():
         async def complete(*, model, messages):
             return output(model, "Input")
 
         def callback(response):
             if response.agent == "Judge":
-                time.sleep(0.03)  # Deliberately block to verify the explicit publication check.
+                time.sleep(0.03)  # 故意阻塞循环，验证发布报告前的显式截止时间检查。
 
         with pytest.raises(WorkflowError) as caught:
             await run_review_async("Input", Mock(complete=AsyncMock(side_effect=complete)), **MODELS,
@@ -314,6 +328,7 @@ def test_callback_overruns_total_budget_cannot_publish_final_report():
 
 
 def test_swallowing_model_timer_cancellation_cannot_return_success():
+    """客户端吞掉定时取消并返回文本，仍被判为模型超时。"""
     async def scenario():
         async def complete(**kwargs):
             try:
@@ -330,6 +345,7 @@ def test_swallowing_model_timer_cancellation_cannot_return_success():
 
 
 def test_progress_snapshots_and_one_shot_run_handle():
+    """阶段快照准确递进，且同一个运行句柄不能重复使用。"""
     async def scenario():
         run = ReviewRun()
         snapshots = []
@@ -353,6 +369,7 @@ def test_progress_snapshots_and_one_shot_run_handle():
 
 
 def test_sync_facade_rejects_nested_event_loop():
+    """在运行中的事件循环内调用同步入口会明确报错且不调用模型。"""
     async def scenario():
         client = Mock(complete=AsyncMock())
         with pytest.raises(RuntimeError, match="await run_review_async"):
@@ -362,6 +379,7 @@ def test_sync_facade_rejects_nested_event_loop():
 
 
 def test_blocking_client_cannot_overrun_model_budget_and_publish_success():
+    """客户端阻塞事件循环并超预算后返回，也不能视为调用成功。"""
     async def scenario():
         async def complete(**kwargs):
             time.sleep(0.03)

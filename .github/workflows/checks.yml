@@ -33,6 +33,6 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          python docs/day-04/examples/E03_local_http_smoke.py
-          python docs/day-05/examples/E01_ui_http_smoke.py
+          python examples/api/E03_local_http_smoke.py
+          python examples/ui/E01_ui_http_smoke.py
           python scripts/smoke_restart.py

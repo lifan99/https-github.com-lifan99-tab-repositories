@@ -1,0 +1,683 @@
+# U1 Lecture：异步函数从创建到返回，究竟怎样执行？
+
+准备日期：2026-10-24。所属单元：[U1 执行模型](../学习路线.md)。第 0 节建立系统背景，第 1～8 节解释异步机制并配合可运行示例，第 12 节供独立练习。讲解与示例粗估 60～90 分钟，lab 另计约 35～60 分钟，可以跨学习日完成。
+
+本讲讨论一个贯穿网络服务的问题：**一份工作正在等待时，程序怎样继续推进其他工作？**我们会从操作系统的执行流出发，逐步解释 Python 协程如何创建、暂停并恢复。
+
+先修要求是普通函数、赋值、列表、返回值和异常的基本用法。例子使用离线模拟下载，让执行顺序清楚可见；建立模型后，再把它用于 HTTP 客户端和 Web 服务。
+
+读完应能区分 coroutine function、coroutine object 和 Task；追踪创建、调度、暂停、恢复与返回；判断一段代码中的执行先后是否有保证。
+
+下面的 Python 示例统一采用 Python 3.12、默认任务工厂；我们创建的 Task 都由同一条线程中的同一个事件循环推进，按成功路径分析。Notebook 运行环境本身可以有其他线程。操作系统状态图另用单核、两线程的简化模型说明调度；失败与取消留到 U5。
+
+读每条轨迹时，区分三件事：**执行所需的条件已满足、调度器已选择它、代码已实际执行。**从“可以执行”走到“正在执行”，必须有明确的调度事件。
+
+## 0. 从操作系统到异步：谁在执行，谁在等待
+
+设想一个服务已经发出了两个请求。A 的响应还没到，B 却已经有数据可处理：程序怎样才能利用这段等待时间？回答这个问题，需要先确定三件事：谁在执行代码，谁保存执行进度，以及等待期间谁还能继续工作。
+
+这一节从操作系统的执行模型出发，再接到 Python 的事件循环。后面的 `async def`、Task 和 `await`，都可以放回这幅图景中理解。
+
+### 0.1 程序、进程与线程
+
+磁盘上的程序保存指令和数据；运行中的程序还需要记录当前数据、执行位置和已打开的资源。操作系统用 **process（进程）**描述这样一次运行。[OSTEP §4.1](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf)
+
+把这个概念用于当前环境：通常由 Python 解释器所在的进程执行脚本；在 Notebook 中，代码单元格交给已经启动的内核执行。后面观察到的进程编号属于运行代码的内核，而不是磁盘上的 Notebook 文件。[Jupyter 内核说明](https://jupyter-client.readthedocs.io/en/stable/kernels.html)
+
+进程内的一条执行流称为 **thread（线程）**。同一进程的线程共享地址空间，各自保存执行位置、寄存器状态和调用栈，因此能在共享数据的同时分别推进代码。在常见的操作系统线程模型中，CPU 调度器选择可运行的线程使用处理器。[OSTEP 第 26 章导论](https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf)
+
+在本讲中，进程帮助我们定位资源的归属，线程帮助我们定位代码的执行。稍后引入的 `asyncio.Task` 则描述由异步运行时管理的一份工作：多个 Task 可以共用同一条线程。第 5.1 节会用进程、线程和 Task 的标识观察这层关系。
+
+### 0.2 等待条件与等待 CPU，有什么区别？
+
+先解释下面会用到的 **I/O（input/output，输入输出）**：例如从文件或网络连接读取数据，或向它们写入数据。网络读取需要的数据可能尚未到达，线程这时要怎样等待，取决于所调用接口的行为。
+
+本讲说的**同步阻塞调用**包含两层意思：普通同步函数沿当前执行流执行，调用返回或抛出异常后，调用者才沿相应控制流继续；如果函数内部需要等某个条件，并使调用线程在此期间无法继续执行，就是阻塞等待。例如，阻塞模式的网络读取在没有数据、连接也未结束且没有错误时，可以让调用线程等到数据到达。[Python socket 的阻塞模式](https://docs.python.org/3.12/library/socket.html#notes-on-socket-timeouts)
+
+同步函数也可能立即完成，因此“同步”不等于“每次都会阻塞”。阻塞等待通常会让操作系统安排其他线程运行，也不等于持续占用 CPU 反复检查。后文的异步 `await` 同样可以取得返回结果，不能用“有没有返回值”区分同步与异步。
+
+一条执行流暂时没有推进，可能有两种原因：它已经可以运行，但调度器尚未选中它；或者它需要的数据还没到，即使给它 CPU，也暂时无法完成接下来的读取。OSTEP §4.4 用三个状态区分这些情形：
+
+| 状态 | 含义 |
+| --- | --- |
+| running | 此刻正在使用 CPU 执行指令 |
+| ready | 已具备运行条件，等待调度器分配 CPU |
+| blocked | 等待 I/O 等条件满足，暂时无法继续相关操作 |
+
+例如，一条线程发起阻塞读取，数据尚未到达时进入等待；数据到达后，它具备继续运行的条件，仍需获得 CPU 才能执行后续指令。下面假设只有一个 CPU 核心，T1、T2 都尚未结束，并明确选择一条可能发生的轨迹：
+
+| 时刻 | 本轨迹中实际发生的事件 | T1 | T2 |
+| --- | --- | --- | --- |
+| ① | CPU 正在执行 T1；T2 已可运行 | running | ready |
+| ② | T1 发起阻塞读取，因数据未到而进入等待 | blocked | ready |
+| ③ | 调度器选中 T2，并完成切换，T2 开始执行 | blocked | running |
+| ④ | T1 所需数据到达；调度器暂时继续运行 T2 | ready | running |
+| ⑤ | 调度器将尚未结束的 T2 切回 ready，选中 T1 并切换执行 | running | ready |
+
+第 ② 步只说明 T2 可以运行，直到第 ③ 步才说明它已经运行。第 ④ 步只让 T1 重新具备运行条件，直到第 ⑤ 步它才恢复执行。这里没有规定所有系统都要等到第 ⑤ 步才切回 T1：数据到达时也可以立即调度它；关键是叙述必须写明实际采用哪条轨迹。
+
+因此，**条件满足不等于已经恢复执行，恢复还取决于调度。**这沿用教材的简化状态模型；分析多线程程序时，要指出具体是哪条线程，不能将这张表直接当作 Python Task 的状态枚举。[OSTEP §4.4](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf)
+
+同步阻塞调用等待期间，操作系统可以安排其他线程运行。不过，若两个请求都依靠这同一条线程推进，另一个请求仍会受影响。长时间计算也会占用这条线程，但原因不同：计算时它在执行指令，阻塞等待时它在等条件满足。
+
+### 0.3 事件驱动怎样利用等待时间？
+
+一种组织方式是使用多个线程，让操作系统在它们之间调度。另一种方式是在一条线程中推进多份工作：程序使用支持异步等待的操作；当前调用链实际暂停并交还控制权后，事件循环才能选择其他就绪工作，并推进被选中的工作。仅有“数据尚未到达”这个事实，不会自动触发 Task 切换。事件循环负责组织这些推进与等待。[OSTEP §33.1–33.2](https://pages.cs.wisc.edu/~remzi/OSTEP/threads-events.pdf)
+
+这里有两层调度关系：
+
+```text
+操作系统调度器
+    └─ 安排事件循环所在的线程使用 CPU
+           └─ 事件循环在用户空间推进 Task A、Task B 等工作
+```
+
+操作系统可以抢占事件循环所在的线程。“抢占”指调度器可以暂停一条正在运行的线程，让其他线程获得 CPU。线程恢复时，会从被打断的位置继续；至于接下来推进哪个 Python Task，仍由异步运行时组织。因此，一个 Task 连续计算时，操作系统即使切走又切回这个线程，也不会自动替它换成另一个 Task。[Python asyncio 执行说明](https://docs.python.org/3.12/library/asyncio-dev.html#concurrency-and-multithreading)
+
+当暂时没有可推进的工作时，事件循环可以等待 I/O 就绪或定时器事件；它不需要持续占用 CPU 查询。关键在于：进入这种等待时，循环知道自己眼下没有其他工作可做。如果某个处理过程直接调用同步阻塞函数，线程也可能停住，但此时其他已经就绪的工作会一起被耽误。[OSTEP §33.2、§33.5](https://pages.cs.wisc.edu/~remzi/OSTEP/threads-events.pdf)
+
+Kurose/Ross 的应用层讲义从进程间交换消息讲起，再用 socket 描述程序与传输服务的接口。这里先把 socket 理解为程序收发网络数据所使用的接口；HTTP 讲义进一步说明请求和响应的交换。[应用层 §2.1，Processes communicating / Sockets](https://gaia.cs.umass.edu/kurose_ross/videos/2/1/2.1_video_ppt.pptx)、[§2.2，HTTP overview](https://gaia.cs.umass.edu/kurose_ross/videos/2/2/2.2_video_ppt.pptx)
+
+与阻塞读取相比，**非阻塞读取**在暂时不能取得数据时，会立即报告暂不可用，而不是让线程一直等着。异步运行时可以结合这种接口与就绪通知，在有条件时再尝试读取。不过，一次非阻塞调用本身不会自动创建或切换 Task；是否交还控制权，还取决于上层调用链。[Python socket 模式说明](https://docs.python.org/3.12/library/socket.html#notes-on-socket-timeouts)
+
+结合这里的分层关系与前面的 I/O 就绪模型，本讲进一步区分“有数据可读”和“业务结果已完整”：在基于 TCP 的 HTTP 通信中，读取到的数据还要经过 HTTP 协议处理，因此 I/O 就绪不能直接当作完整响应已收到。这是本讲连接两个模型时作出的解释，U3 会用具体消息继续展开。
+
+### 0.4 把这幅图景接到 `await`
+
+Python 协程可以在暂停时保留执行进度，Task 和事件循环共同组织它的继续执行。于是，一份工作等待异步操作时，可以把执行机会交回循环；但如果它调用的是同步阻塞函数，停住的可能就是循环所在的线程。函数内部调用的性质，决定这条线程能否继续服务其他工作。[Python 阻塞代码说明](https://docs.python.org/3.12/library/asyncio-dev.html#running-blocking-code)
+
+接下来先用小程序区分三个动作：调用协程函数、把协程交给 Task 调度，以及等待结果。阅读时始终追踪同一个问题：**这一段执行停在哪里，停下之后谁能继续？**
+
+## 1. 先用一个小程序看见“等待”
+
+假设要取得 A、B 两份互不依赖的数据。先看一个离线的模拟函数：
+
+```python
+import asyncio
+
+
+async def download(name, trace):
+    trace.append(f"{name}:start")
+    await asyncio.sleep(0)
+    trace.append(f"{name}:end")
+    return f"data:{name}"
+```
+
+`trace` 是普通列表，用来按发生顺序记下动作。`download` 的名字表示场景；这里没有真实下载。`asyncio.sleep(0)` 用来明确交出一次执行机会，不产生有意义的网络耗时。
+
+Notebook 中还会看到 `name: str`、`trace: list[str]` 和 `-> str` 这样的类型标注：它们分别说明预期的参数类型与返回类型。标注帮助阅读，本身不自动检查传入值，也不改变执行顺序。先读函数体中的实际操作即可。
+
+先按下面的方式调用：
+
+```python
+async def main():
+    trace = []
+    first = await download("a", trace)
+    second = await download("b", trace)
+    print(trace)
+    print(first, second)
+
+
+asyncio.run(main())
+```
+
+执行顺序是：
+
+```text
+a:start → a:end → b:start → b:end
+```
+
+沿着 `main` 的控制流读：它先等待 A 返回，将结果赋给 `first`，然后才执行创建 B 的下一句。A 执行到 `sleep(0)` 时，当前执行实际暂停，控制权交回事件循环。此时 B 尚未创建，所以不存在可供循环推进的 B。之后循环再次安排当前执行继续，A 才记录 `a:end` 并返回；`main` 得到 A 的结果后，才开始 B。
+
+这里的“交回事件循环”和“再次安排继续”是两步。暂停并不保证中间一定运行另一份业务工作；当前执行也可以在下一次获得机会时继续自己。第 2 节会说明，本例直接等待的 A 与 `main` 属于同一个 Task。
+
+这个例子给出了一个判断起点：**使用 `async def` 和 `await` 的代码，也可以按先后顺序完成全部工作。** A、B 本来互不依赖，但这里的控制流安排了先 A 后 B。分析并发时，要同时看数据依赖和工作的创建、调度时机。
+
+本讲的可运行版本在 [demos.py](u1_async/demos.py)，只用 Python 标准库。各小节的短代码是说明片段；要直接执行，请运行完整脚本：
+
+```bash
+cd /home/fanli/ai-engineering/multi-agent/mvp
+.venv/bin/python study/lectures/u1_async/demos.py sequential
+```
+
+本例沿用开头的运行条件：默认任务工厂、同一事件循环线程、成功路径。后文讨论的 Task 创建与切换都在这些条件下分析。
+
+## 2. 三个容易混在一起的对象
+
+从这两行开始：
+
+```python
+job = download("a", trace)
+result = await job
+```
+
+普通函数调用通常会立即进入函数体。协程函数调用则先返回一个协程对象：第一行只是得到 `job`，还没有执行 `download` 的函数体，也没有记录 `a:start`。第二行等待这个对象时，才推进这次调用。后面还会看到，创建 Task 也能安排它的执行。
+
+| 名称 | 本例中的对象 | 含义 |
+| --- | --- | --- |
+| coroutine function（协程函数） | `download` | 用 `async def` 定义的函数 |
+| coroutine object（协程对象） | `job` | 调用这个函数得到的一次执行对象；运行后可在暂停点保存进度 |
+| Task（任务） | 后面创建的 `task` | 将协程交给事件循环调度，并保存完成结果或异常的对象 |
+
+它们之间的关系可以这样读：
+
+```text
+协程函数 --调用--> 协程对象
+                       ├─ 直接 await：在当前 Task 内推进和等待
+                       └─ create_task：创建另一个可被调度的 Task
+```
+
+直接 `await` 一个协程对象不会自动创建一个新 Task。本讲脚本中的 `main` 本身也在入口安排的 Task 中执行；调用链可以有 `main → download → sleep` 多层协程，它们仍然可能属于同一个 Task。调用协程函数与创建 Task 的区别可核对 [Python Awaitables 文档](https://docs.python.org/3.12/library/asyncio-task.html#awaitables)。
+
+运行创建示例：
+
+```bash
+.venv/bin/python study/lectures/u1_async/demos.py creation
+```
+
+输出中 `created` 在 `a:start` 前面。它记录了“已得到协程对象”和“函数体开始运行”是两个不同的时刻。完整示例最后确实等待了该对象，避免只创建却遗漏执行。
+
+## 3. event loop 和 Task 各自负责什么
+
+有了协程对象，还需要回答：谁让它开始，暂停后又由谁安排继续？在 asyncio 中，event loop（事件循环）组织就绪工作、定时器和 I/O 事件；Task 管理一份协程的执行，保存完成结果，并跟踪它正在等待的对象。二者共同把一次调用从开始推进到结束。
+
+在本讲的单线程条件下，同一时刻只有一个 Task 的 Python 代码在该线程执行。一个 Task 正在连续计算时，其他 Task 不会仅因为“也已经创建”就插进来执行。异步编程要让等待能够交还控制权。[事件循环说明](https://docs.python.org/3.12/library/asyncio-eventloop.html)、[asyncio 开发说明](https://docs.python.org/3.12/library/asyncio-dev.html#concurrency-and-multithreading)
+
+可以先采用下面这个阅读模型：
+
+```text
+Task 获得执行机会
+        ↓
+推进协程，执行一段代码
+        ↓
+调用链实际暂停？──否──→ 返回结果，或继续当前计算
+        │
+        是，等待异步操作或显式让出
+        ↓
+保存进度，交还控制权
+        ↓
+事件循环推进已选中的就绪工作，或等待事件
+        ↓
+所等待的操作完成后，Task 可以恢复
+（显式让出的 Task 则被安排在后续继续）
+        ↓
+事件循环实际选择并推进这个 Task
+        ↓
+Task 从暂停点继续执行
+```
+
+这幅图描述执行过程，图中的词语用于解释机制，不对应 `Task` 的公开状态枚举。“可以恢复”这一行只说明具备条件；“实际选择并推进”这一行才说明该 Task 获得了执行机会。在这两步之间，循环可能先推进其他就绪工作。第 6.1 节会分别记录条件通知和后续执行。
+
+<details>
+<summary>选读：Future 怎样连接结果与恢复？</summary>
+
+**Future** 可以先理解为保存“将来会有的结果或异常”的对象。常见异步 I/O 在底层用它连接“结果就绪”和“唤醒等待者”。本讲后面只要求识别它属于可等待对象，不要求构造或研究其内部实现。[Future 文档](https://docs.python.org/3.12/library/asyncio-future.html#future-object)
+
+`sleep(0)` 有专门的让出执行路径；常见 I/O 的模型不意味着每个暂停都必须创建一个 Future。
+
+</details>
+
+## 4. `await` 到底做了什么
+
+`await expression` 先求出右边表达式的值。这个值必须是 awaitable（可等待对象），例如协程对象、Task 或 Future。普通字符串不会因为加上 `await` 就变成异步操作。[await 表达式](https://docs.python.org/3.12/reference/expressions.html#await-expression)
+
+之后需要区分两种情况：
+
+| 情况 | 当前执行会怎样 |
+| --- | --- |
+| 调用链执行到返回，期间没有实际暂停 | 当前 Task 继续执行；其中的同步计算即使耗时，也不会自动切换任务 |
+| 调用链需要等待一个尚未完成的异步操作 | 当前 Task 暂停，把执行机会交还给事件循环 |
+
+因此，阅读 `await` 要沿着被等待的调用继续追踪：它是在当前这次执行中直接返回，还是确实需要暂停？下面用一个立即返回的协程，把这个区别显现出来：
+
+```python
+async def immediate():
+    return "ready"
+```
+
+再看调用它的片段；`marker(trace)` 的全部函数体只是 `trace.append("marker")`：
+
+```python
+peer = asyncio.create_task(marker(trace))
+trace.append("before-await")
+value = await immediate()
+trace.append(f"after-await:{value}")
+await peer
+```
+
+在本讲的运行条件下，记录顺序为：
+
+```text
+before-await → after-await:ready → marker
+```
+
+`await immediate()` 进入 `immediate`，立即得到返回值，中间没有实际暂停。因此，当前 Task 继续记录 `after-await:ready`。此时 `peer` 虽已被创建并安排执行，但其函数体还没有运行。
+
+接下来是实际发生的切换：当前 Task 执行 `await peer`，发现 `peer` 尚未完成，于是暂停；事件循环随后选中并推进 `peer`，它记录 `marker` 后完成。`peer` 完成使等待它的当前 Task 可以恢复；循环再安排当前 Task 继续，`await peer` 才结束。若等待的 Task 早已完成，`await` 它则不需要这次暂停。
+
+运行核对：
+
+```bash
+.venv/bin/python study/lectures/u1_async/demos.py ready
+```
+
+这个反例说明：**`await` 表达的是等待结果的语义，不能把每一个 `await` 都当成必然切换任务的标记。**
+
+如果被等待的操作抛出异常，`await` 所在位置也可能收到异常；不能一律按“返回一个值”来读。异常传播和取消策略留到后续单元展开。
+
+## 5. 怎样让两个独立工作都有推进机会
+
+现在先创建两个 Task，再等待结果：
+
+```python
+first_task = asyncio.create_task(download("a", trace))
+second_task = asyncio.create_task(download("b", trace))
+trace.append("scheduled")
+
+first = await first_task
+second = await second_task
+```
+
+先区分创建与实际执行：
+
+1. 两次 `download(...)` 分别产生协程对象，尚未进入函数体。
+2. 两次 `create_task(...)` 分别创建 Task 并安排它们执行；当前 Task 仍在执行，因此先记录 `scheduled`。
+3. 当前 Task 执行 `await first_task`。此时 `first_task` 尚未完成，当前 Task 暂停，控制权才交回循环。
+
+到第 3 步，两份下载工作都已被安排，循环具备推进它们的条件。它们实际何时开始、何时恢复，需要继续看循环随后选择了哪份工作。
+
+按本讲默认的 Task 创建方式，`create_task` 会安排后续执行，不会抢占当前正在运行、尚未交还控制权的代码。因此本例先记录 `scheduled`，再运行两个下载的函数体。[创建 Task](https://docs.python.org/3.12/library/asyncio-task.html#creating-tasks)
+
+<details>
+<summary>版本边界：本讲不定制 Task 的创建方式</summary>
+
+运行条件中的“默认任务工厂”表示沿用事件循环默认的 Task 创建策略。Python 3.12 也提供 eager task factory，允许在创建 Task 时就开始推进协程，因此会改变上面的开始时机。本讲不启用它，当前学习无需掌握其配置。[官方说明](https://docs.python.org/3.12/library/asyncio-task.html#eager-task-factory)
+
+</details>
+
+运行：
+
+```bash
+.venv/bin/python study/lectures/u1_async/demos.py tasks
+```
+
+下面是一条可观察的轨迹：
+
+```text
+scheduled → a:start → b:start → a:end → b:end → results:data:a,data:b
+```
+
+下面把这条轨迹中省略的调度事件补出来。“调用者”指运行上述代码的 Task，A、B 分别指两份下载 Task。
+
+| 步骤 | 当前实际执行的工作与事件 | 新增记录 |
+| --- | --- | --- |
+| ① | 调用者创建 A、B；它们已被安排，但还没有运行 | `scheduled` |
+| ② | 调用者等待尚未完成的 A，实际暂停并交还控制权 | — |
+| ③ | 循环选中 A；A 开始执行，再在 `sleep(0)` 处让出 | `a:start` |
+| ④ | 循环选中 B；B 开始执行，再在 `sleep(0)` 处让出 | `b:start` |
+| ⑤ | 循环再次选中 A；A 恢复并返回结果，调用者因而可以恢复 | `a:end` |
+| ⑥ | 在这条轨迹中，循环先选中 B；B 恢复并返回结果 | `b:end` |
+| ⑦ | 循环恢复调用者；它取得 A 的结果，再等待已完成的 B 并立即取得结果 | `results:data:a,data:b` |
+
+第 ⑤ 步的 A 完成，并没有让调用者立刻抢占第 ⑥ 步；调用者到第 ⑦ 步才实际继续。上表解释的是给出的这条轨迹。换成真实网络等待时，完成顺序还取决于响应到达等条件，不能套用同一张完整顺序表。
+
+读这条轨迹时，逐项寻找代码中的依据。必要的先后关系可以从控制流推出，而不同任务之间的完成先后还取决于它们实际等待的情况：
+
+- 本例每个任务内部都保证 `start` 在自己的 `end` 前。
+- 最后的结果记录在两个 Task 都被等待完成之后。
+- A、B 的结果分别存到 `first`、`second`，这个对应关系由变量和等待对象决定。
+- 一次看到 A 先完成，不足以推导“所有并发调用都按创建顺序完成”。
+
+**两个 `await` 写成前后两行，仍然可能等待着已经并发运行的任务。** 第一节的两个 `await download(...)` 则是先完成一次调用，才创建下一次调用。关键差异在任务的创建与调度时机。
+
+后面的 U2 再学习批量组织和汇总任务；此处先把两个 Task 的机制读清楚。
+
+### 5.1 观察 Task 与操作系统线程的区别
+
+下面创建两份 Task，分别记录当前进程、操作系统线程和 Task 对象的标识。`os.getpid()` 给出进程编号，`threading.get_native_id()` 给出当前操作系统线程编号，`id(...)` 在对象存活期间区分 Python 对象。[线程编号说明](https://docs.python.org/3.12/library/threading.html#threading.get_native_id)
+
+编号的具体数值每次都可能不同；要比较的是同一次运行里的相同与不同。`len(...)` 统计数量，`{...}` 这里构造集合，用来去掉重复的编号。`assert condition` 检查条件，条件为假时抛出 `AssertionError`，表示本次观察不符合预期。它检查的是给定条件，不自动证明所有运行都正确。下面是已讲解示例，不是独立作业。
+
+```python
+import asyncio
+import os
+import threading
+
+
+async def observe_unit(label):
+    return {
+        "label": label,
+        "pid": os.getpid(),
+        "thread_id": threading.get_native_id(),
+        "task_id": id(asyncio.current_task()),
+    }
+
+
+async def compare_execution_units():
+    tasks = [asyncio.create_task(observe_unit(label)) for label in ("a", "b")]
+    rows = [await task for task in tasks]
+    for row in rows:
+        print(row)
+    assert len({row["pid"] for row in rows}) == 1
+    assert len({row["thread_id"] for row in rows}) == 1
+    assert len({row["task_id"] for row in rows}) == 2
+    return rows
+
+unit_rows = asyncio.run(compare_execution_units())
+```
+
+Notebook 中最后一行使用 `unit_rows = await compare_execution_units()`。
+
+这个例子展示两份不同的 Task 可以在同一进程、同一线程内执行。它没有创建新的线程，也不证明两个 Task 在同一时刻并行计算，或整个 Notebook 内核只有一条线程。Task 会被保存在列表里，并在例子结束前全部等待完成。
+
+这与“操作系统能调度多个线程”并不矛盾：两种模型处于不同层次。线程调度和 Task 调度应分别分析。
+
+## 6. 同步阻塞为什么会妨碍其他 Task 推进
+
+用第 0.2 节的定义对比两个片段。这里的关键是等待影响的执行层次：
+
+```python
+time.sleep(0.02)
+```
+
+```python
+await asyncio.sleep(0)
+```
+
+`time.sleep` 暂停调用它的线程。如果事件循环也在这个线程里，就无法在这段时间推进其他 Task。把这句放进 `async def`，不会改变它的同步阻塞性质。[time.sleep](https://docs.python.org/3.12/library/time.html#time.sleep)
+
+`asyncio.sleep` 暂停当前 Task，允许事件循环推进其他可执行工作；参数为 0 时仍会让出执行。[asyncio.sleep](https://docs.python.org/3.12/library/asyncio-task.html#sleeping)
+
+| 操作 | 等待影响谁 | 同一循环中的其他 Task |
+| --- | --- | --- |
+| `time.sleep(1)` | 事件循环所在的调用线程休眠 | 该循环无法在此期间推进它们 |
+| `await asyncio.sleep(1)` | 当前 Task 暂停 | 循环可以选择并推进就绪工作 |
+
+这比较的是阻塞线程与暂停 Task。上面的演示仍使用短暂休眠和 `sleep(0)`，通过记录顺序观察机制；没有要求实际测量一秒。
+
+完整示例先创建一个只记录 `marker` 的任务，再分别执行两种等待：
+
+```bash
+.venv/bin/python study/lectures/u1_async/demos.py blocking
+.venv/bin/python study/lectures/u1_async/demos.py yielding
+```
+
+观察到：
+
+```text
+blocking: before-block → after-block → marker
+yielding: before-wait → marker → after-wait
+```
+
+两条轨迹的差别来自暂停发生的层次。
+
+第一条中，`time.sleep` 让事件循环所在的线程休眠，循环无法推进 `marker`。休眠结束只是让线程重新具备运行条件；等操作系统再次调度该线程后，原来的当前 Task 才继续记录 `after-block`。它随后等待尚未完成的 `peer` 并暂停；循环这时才能选中并推进 `peer`，记录 `marker`。
+
+第二条中，`asyncio.sleep(0)` 暂停的是当前 Task，控制权已交回事件循环。在给出的轨迹里，循环接着选中 `peer`，记录 `marker` 并完成它，然后恢复原 Task，记录 `after-wait`。这里明确写出的选择解释了观测顺序；“允许其他工作运行”本身不等于已经观察到它运行。
+
+同样，长时间 CPU 计算或同步网络请求直接运行在事件循环线程上，也会妨碍其他任务推进。给外层函数加 `async` 不会自动把这些操作转移到另一个线程。[阻塞代码说明](https://docs.python.org/3.12/library/asyncio-dev.html#running-blocking-code)
+
+### 6.1 等待条件满足，为什么还要等一次调度？
+
+到这里，我们已经看见 Task 可以主动让出执行机会。还有一个问题：如果它确实在等某个条件，谁告诉它可以继续？下面让消费者等待一条通知，由控制者决定通知何时发出。`asyncio.Event` 用来表达这个条件；例子观察的是同一事件循环中的 Task 协作，网络数据如何到达则留到 U3。
+
+`Event()` 的标志初始为假；`await event.wait()` 在标志为假时暂停当前 Task；`event.set()` 将标志设为真，让等待者可以恢复。标志已为真时再 `await event.wait()` 会立即返回。这是异步等待，不会像 `time.sleep` 那样阻塞事件循环线程；该对象也不能用于跨线程同步。[Python Event 文档](https://docs.python.org/3.12/library/asyncio-sync.html#event)
+
+例子里的 `waiting` 用来通知控制者：消费者已经执行到 `waiting.set()`。这句通知本身还不表示消费者已经暂停；它接着执行 `await released.wait()` 才实际等待。`released` 是消费者等待的条件，由控制者设置。`task.done()` 检查任务是否已经结束，不能单独用来区分“尚未开始”“正在等待”或“已经可以恢复”。
+
+代码在 `demo_notification` 内部定义 `consumer`。这是嵌套函数：定义本身不会执行它的函数体；它可以访问外层的 `trace`、`waiting`、`released`。后面的 `create_task(consumer())` 才安排这次协程调用。本节使用这种组织方式保留示例数据，无需先学习闭包实现原理。
+
+```python
+import asyncio
+
+
+async def demo_notification() -> list[str]:
+    trace: list[str] = []
+    waiting = asyncio.Event()
+    released = asyncio.Event()
+
+    async def consumer() -> None:
+        trace.append("consumer:waiting")
+        waiting.set()
+        await released.wait()
+        trace.append("consumer:resumed")
+
+    task = asyncio.create_task(consumer())
+    await waiting.wait()
+    trace.append("controller:working")
+    assert not task.done()
+    released.set()
+    trace.append("controller:signaled")
+    assert not task.done()
+    await task
+    trace.append("controller:joined")
+    return trace
+
+print(asyncio.run(demo_notification()))
+```
+
+在本讲的单线程、默认任务工厂条件下，轨迹是：
+
+```text
+consumer:waiting → controller:working → controller:signaled → consumer:resumed → controller:joined
+```
+
+从控制者创建任务的位置开始追踪，才能看清第一次执行机会来自哪里：
+
+| 步骤 | 实际发生的事件 | 当前执行者／等待关系 |
+| --- | --- | --- |
+| ① | 控制者创建消费者 Task，再执行 `await waiting.wait()`；标志为假，控制者暂停 | 控制者等待 `waiting` |
+| ② | 循环选中消费者；它记录 `consumer:waiting` 并设置 `waiting` | 控制者可以恢复，消费者仍在执行 |
+| ③ | 消费者继续执行 `await released.wait()`；标志仍为假，实际暂停 | 消费者等待 `released` |
+| ④ | 循环恢复控制者；它记录 `controller:working`，设置 `released`，再记录 `controller:signaled` | 消费者可以恢复，控制者仍在执行 |
+| ⑤ | 控制者执行 `await task`；消费者尚未完成，控制者暂停 | 控制者等待消费者结束 |
+| ⑥ | 循环恢复消费者；它记录 `consumer:resumed`，然后返回 | 消费者完成，控制者可以恢复 |
+| ⑦ | 循环恢复控制者；`await task` 结束，它记录 `controller:joined` | 控制者实际继续执行 |
+
+第 ②、④、⑥ 步都满足了另一份工作的等待条件，但当前执行者并未因此立刻被替换；后续实际恢复分别发生在第 ④、⑥、⑦ 步。
+
+因此，“条件已经满足”“任务可以执行”和“任务已经执行完毕”是不同事实。若把标志在等待前就设为真，`wait()` 可以直接返回；不能仅凭看到 `await` 就断言发生切换。这里验证的是 Task 层面的关系，没有测量 OS 线程的 ready/blocked 状态。
+
+## 7. 并发、并行与业务依赖
+
+本讲的并发是多个任务在一段时间内交替推进。它们的等待能够重叠，但同一个事件循环线程不会同时执行两段 Task 的 Python 计算。真正把多份 CPU 计算同时放在不同执行资源上，需要另行考虑并行方案。
+
+如果两个互不依赖的请求主要花时间等待外部响应，交叠等待可以缩短整体等待时间。在忽略本地开销、资源竞争和服务端限制的理想模型下，两份等待从接近 `a + b` 变为接近 `max(a, b)`。这只是模型推论，不是任意真实网络调用的性能承诺。
+
+先判断依赖，再安排并发：
+
+| 场景 | 应先判断什么 |
+| --- | --- |
+| 获取两个独立页面 | 是否能独立构造并发出两个请求 |
+| 用登录返回的令牌请求资料 | 后一个操作需要前一个操作的返回值 |
+| 本地计算两个巨大矩阵 | 主要成本是否为 CPU 计算，单个事件循环能否提供计算并行 |
+
+是否能重叠推进，首先由依赖关系约束：缺少令牌时，后续请求连所需参数都不完整；两个独立页面则可以分别发起。异步运行时提供组织工作的能力，程序仍要尊重这些约束。以后阅读 FastAPI 或模型调用时，也可以先找出每一步需要什么结果，再追踪等待期间谁还能推进。
+
+## 8. 一份完整异步脚本如何启动
+
+本讲脚本入口使用：
+
+```python
+asyncio.run(main())
+```
+
+`main()` 先产生协程对象；`asyncio.run` 管理事件循环并运行这个顶层协程，返回时关闭它管理的循环。通常把它放在独立脚本入口。在同一线程已经运行事件循环的环境中，不能再嵌套调用它；届时应由已有运行环境管理入口。[Python Runners](https://docs.python.org/3.12/library/asyncio-runner.html#running-an-asyncio-program)
+
+本讲保存并等待所有自己创建的 Task。为简洁起见示例没有真实网络和业务失败分支；不把这种成功路径写法视为完整的后台任务生命周期方案。
+
+## 9. 用同一套问题阅读以后遇到的代码
+
+| 看到的代码 | 应当问的问题 |
+| --- | --- |
+| `async def f(...)` | 这里定义了什么行为，函数体何时才会运行？ |
+| `job = f(...)` | 得到的是协程对象，还是已经取得的业务结果？ |
+| `task = asyncio.create_task(job)` | 谁调度它，谁保存引用并等待它结束？ |
+| `value = await job_or_task` | 正在等哪个结果，调用链是否会实际暂停？ |
+| 两个前后相邻的 `await` | 等待的是尚未创建的后续工作，还是早已调度的任务？ |
+| 同步 I/O 或长计算 | 运行在哪个线程，会不会阻碍事件循环推进？ |
+
+本讲的五个要点：调用协程函数产生协程对象；创建 Task 安排后续执行；`await` 是否暂停取决于实际等待情况；条件满足后仍须由事件循环实际推进 Task 才算恢复；同步阻塞会妨碍同一线程中的事件循环推进工作。
+
+## 10. 即时理解检查（可选，暂不附答案）
+
+这两题用于定位读完讲义后的疑问，不自动算作独立迁移验收。可以先口述，不必写成长报告。
+
+**题 1：追踪一次调用。**下面完整脚本返回的列表是什么？说明函数体从哪里开始执行，哪一步发生暂停。
+
+```python
+import asyncio
+
+
+async def source(trace):
+    trace.append("source")
+    await asyncio.sleep(0)
+    return "R"
+
+
+async def main():
+    trace = []
+    job = source(trace)
+    trace.append("caller")
+    trace.append(await job)
+    return trace
+
+
+print(asyncio.run(main()))
+```
+
+**题 2：改变依赖条件。**一个页面生成任务先读取清单；清单给出图片地址和样式表地址；这两份资源互不依赖；最后必须拿到两份资源才能生成页面。描述哪些工作可以重叠、哪些结果必须先得到，并用本讲的执行模型说明理由。暂不要求提供完整程序。
+
+## 11. 学习材料与验证范围
+
+本讲代码在 Python 3.12 环境下运行核对，并提供 [示例行为检查](u1_async/test_demos.py)：
+
+```bash
+.venv/bin/python study/lectures/u1_async/demos.py
+.venv/bin/python -m pytest study/lectures/u1_async/test_demos.py -q
+```
+
+这些检查验证已讲解示例中的创建时机、依赖顺序、重叠推进、立即返回、阻塞以及条件通知后的恢复行为；并发示例检查必要的先后关系，不用网络耗时或任意一种完整调度顺序作为通过标准。它们不验证本人掌握，也不涵盖真实网络、异常恢复和完整资源清理策略。
+
+读完后回到 [今天](../今天.md) 记录停止位置和一个仍待解释的问题。第 12 节独立 lab 要求本人实现与验证；本讲准备完成不改变 U1 的学习状态。
+
+### 本讲如何使用原始材料
+
+系统部分参考 OSTEP 的问题组织方式，用“执行在哪里停下、怎样恢复”串起概念。Python 部分依据 asyncio 官方文档说明实际接口行为；下面标出对应位置，便于遇到疑问时回查。
+
+| 本讲位置 | 原始材料中的对应内容 |
+| --- | --- |
+| §0.1–0.2：运行实例与执行状态 | [OSTEP 第 4 章](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf) §4.1、§4.4；[第 26 章](https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf) 导论中的线程、共享地址空间与各自调用栈 |
+| §0.3、§6：事件循环与同步阻塞 | [OSTEP 第 33 章](https://pages.cs.wisc.edu/~remzi/OSTEP/threads-events.pdf) §33.1–33.2、§33.5；§33.7 进一步讨论暂停后如何保留继续处理所需的状态 |
+| §0.3：从执行模型接到网络通信 | [Kurose/Ross §2.1 讲义](https://gaia.cs.umass.edu/kurose_ross/videos/2/1/2.1_video_ppt.pptx) 的 Processes communicating、Sockets；[§2.2 讲义](https://gaia.cs.umass.edu/kurose_ross/videos/2/2/2.2_video_ppt.pptx) 的 HTTP overview。这里只使用进程、消息、socket 与 HTTP 的分层关系 |
+| §2–6.1：Python 的创建、等待与恢复 | [Python 3.12 协程与 Task](https://docs.python.org/3.12/library/asyncio-task.html)、[异步开发说明](https://docs.python.org/3.12/library/asyncio-dev.html)、[Event](https://docs.python.org/3.12/library/asyncio-sync.html#event) |
+
+这些材料供按问题回查；本讲中文说明独立成文，示例按 Python 3.12 编写。原教材中的 C 接口和 Python Task 的细节分属不同层次，不能直接互相替代。
+
+## 12. 独立 lab：需求改变后，重新安排依赖
+
+目标：自己实现异步函数，证明它在不同依赖条件下仍满足调用合同；区分看懂示例与独立实现。先完成第 1～8 节，再做本题。粗估编码、检查和解释共 35～60 分钟，可另用一个学习时段；卡住时记录实际用时，不按估时催进度。
+
+### 任务与合同
+
+实现 `async def load_pair(fetch, dependent=False)`。`fetch` 是测试提供的异步函数，调用形式为 `await fetch(name, context)`，返回字符串。函数也可以作为参数传给另一个函数：这里传入的是可调用的对象，不是某一次调用的结果。
+
+- 每次调用 `load_pair`，必须恰好调用一次 `fetch("left", None)` 和一次 `fetch("right", context)`，不重复请求、不硬编码返回值。
+- `dependent=False`：两项工作互不依赖，right 的 context 为 `None`；当两项都要等待时，必须允许它们在任意一项完成之前都进入 fetch 函数体。不规定谁先开始、谁先完成。
+- `dependent=True`：right 的 context 必须是本次 left 返回的字符串；right 的 fetch 函数体只能在 left 完成后进入。
+- 返回字典 `{"left": left_result, "right": right_result}`，结果归属不能受完成先后影响。返回前，两次调用必须全部完成，自己创建的任务也必须已经结束。
+- 只用 Python 标准库；不使用线程、进程、真实网络或同步休眠。fetch 保证成功，可以立即返回，也可以暂停。参数合法性、异常、取消和清理策略不属于本题评分范围，U5 再展开。
+
+例如测试源的 left 返回 `"L1"`，right 在 context 为 `None` 时返回 `"R0"`、为 `"L1"` 时返回 `"R1"`：两种模式的预期结果分别是 `{"left": "L1", "right": "R0"}` 与 `{"left": "L1", "right": "R1"}`。实际检查会更换字符串；这些只是样例值。
+
+### 作答与公开检查
+
+在下方作答单元格中替换 `NotImplementedError`。检查单元格默认关闭；完成自己的第一次实现后，将 `RUN_LAB_CHECKS` 改为 `True` 再运行。未开启时显示未评估，不算通过。检查工具提供可控数据源，不提供 `load_pair` 的实现；其中用于测试和回收的 API 无需现在掌握。
+
+公开检查覆盖独立等待、依赖等待、立即返回、重复执行与结果归属。超时只是防止错误实现一直挂住，不是速度评分；超时后结合调用记录检查是否有工作永远等不到条件。检查不能中断占住线程的死循环；遇到这种情况使用 Jupyter 的停止或重启内核。
+
+```python
+async def load_pair(fetch, dependent=False):
+    raise NotImplementedError("Implement the contract before enabling checks.")
+```
+
+下面的检查代码用于 Notebook；在独立脚本中运行时，将末尾的 `await check_load_pair(load_pair)` 换成 `asyncio.run(check_load_pair(load_pair))`。
+
+```python
+import asyncio
+
+
+async def check_load_pair(candidate, watchdog_seconds=5):
+    cases = [(False, True), (True, True), (False, False), (True, False)]
+    for case_id, (dependent, delayed) in enumerate(cases):
+        calls = []
+        completed = set()
+        workers = set()
+        both_started = asyncio.Event()
+        right_finished = asyncio.Event()
+        left_value = f"left-value-{case_id}"
+        right_value = f"right-value-{case_id}"
+
+        async def fetch(name, context):
+            workers.add(asyncio.current_task())
+            assert name in ("left", "right"), "Unknown source"
+            assert name not in [item[0] for item in calls], "Repeated call"
+            calls.append((name, context))
+            if name == "left":
+                assert context is None, "Left must receive None"
+            elif dependent:
+                assert "left" in completed, "Right started before left completed"
+                assert context == left_value, "Right needs this run's left result"
+            else:
+                assert context is None, "Independent right must receive None"
+            if len(calls) == 2:
+                both_started.set()
+            if delayed and not dependent:
+                await both_started.wait()
+                if name == "left":
+                    await right_finished.wait()
+            elif delayed:
+                await asyncio.sleep(0)
+            completed.add(name)
+            if name == "right":
+                right_finished.set()
+            return left_value if name == "left" else right_value
+
+        runner = asyncio.create_task(candidate(fetch, dependent=dependent))
+        try:
+            result = await asyncio.wait_for(runner, watchdog_seconds)
+            assert result == {"left": left_value, "right": right_value}, "Wrong results"
+            assert len(calls) == 2 and completed == {"left", "right"}, "Unfinished calls"
+            assert all(task.done() for task in workers), "A fetch task is still running"
+        except Exception:
+            print(f"Failed case {case_id}: dependent={dependent}, delayed={delayed}, calls={calls}")
+            raise
+        finally:
+            both_started.set()
+            right_finished.set()
+            owned = workers | {runner}
+            for task in owned:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*owned, return_exceptions=True)
+    print("4 public cases passed; explanation and later transfer remain unassessed.")
+
+
+RUN_LAB_CHECKS = False
+if RUN_LAB_CHECKS:
+    await check_load_pair(load_pair)
+else:
+    print("Lab not run; mastery remains unassessed.")
+```
+
+### 提交与判断依据
+
+保留你的实现、公开检查结果，以及以下解释：两种模式的必要先后关系分别是什么；发生等待时谁能继续；如果 right 先完成，为什么结果仍能放在正确的位置。再自行增加一项公开检查没有强制覆盖的合法完成顺序或返回值案例，并写明它针对哪一种可能的错误。
+
+反馈分别检查四项：调用次数与参数正确；依赖和重叠要求满足；结果归属及任务结束正确；解释能对应实际代码并说明自加案例的作用。通过公开检查只覆盖已给出的案例，不自动证明所有实现正确，更不代替你的解释。允许不同正确实现，不要求模仿讲义。
+
+没有看解法、提示前完成的部分才记为独立表现；请求帮助后记录实际获得的帮助。完成后可据证据进入 U2，若有局部错误先修正对应部分。稍后再用新需求做一次简短回访，本题不冒充延迟迁移证据。
+
+**我的解释与额外检查（可编辑）：**
+
+在这里写自己的推理、额外案例和获得的帮助；目前未作答／未评估。

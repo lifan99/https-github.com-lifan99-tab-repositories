@@ -1,4 +1,4 @@
-"""Start two actual fake API processes sequentially on one local port."""
+"""在同一本机端口先后启动两个 fake API 进程，验证重启后的请求处理和资源清理。"""
 
 import os
 import socket
@@ -14,6 +14,7 @@ BODY = {"request_id": "restart-demo", "original_input": "仅用内存保存历�
 
 
 def one_process(port):
+    """启动一轮离线服务，验证健康和审核接口，并在所有退出路径回收进程与管道。"""
     process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "review_system.api:create_app", "--factory",
          "--host", "127.0.0.1", "--port", str(port), "--workers", "1", "--log-level", "error"],
@@ -41,8 +42,10 @@ def one_process(port):
             result = response.json()
             assert result["status"] == "succeeded" and len(result["responses"]) == 3
             assert result["execution_mode"] == "fake"
+            # 当前系统没有历史查询端点；重启演示不代表持久化或跨进程幂等。
             assert http.get(f"/api/v1/reviews/{result['review_id']}").status_code == 404
             return process.pid, result["review_id"]
+    # 断言或连接失败时也先尝试正常终止，超时后强制结束，避免残留服务进程。
     finally:
         process.terminate()
         try:
@@ -55,6 +58,7 @@ def one_process(port):
 
 
 def main():
+    """复用同一本机端口先后运行两轮，验证同一请求标识在重启后产生新审核。"""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
