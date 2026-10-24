@@ -1,1 +1,1 @@
-"""Personal multi-agent review system."""
+"""本地多智能体审核系统；业务模块按职责划分，导入包时不启动服务。"""

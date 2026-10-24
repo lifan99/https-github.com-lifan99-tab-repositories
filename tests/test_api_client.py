@@ -1,3 +1,5 @@
+"""界面 HTTP 客户端回归：严格核验响应一致性、超时行为及传输资源归属。"""
+
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -13,11 +15,13 @@ PAYLOAD = json.loads((Path(__file__).parent / "fixtures/d5/success_response.json
 
 
 def invoke(response, *, original=" 原文\n"):
+    """用内存 HTTP 替身调用客户端，返回测试指定的服务响应。"""
     with httpx.Client(transport=httpx.MockTransport(lambda request: response)) as http:
         return ReviewAPIClient(APISettings(), http).review("test-id", original)
 
 
 def test_client_request_has_only_public_fields_and_borrows_transport():
+    """提交仅含公开字段；调用完成后借用的传输仍由外部持有。"""
     seen = []
 
     def handle(request):
@@ -51,6 +55,7 @@ def test_client_request_has_only_public_fields_and_borrows_transport():
     lambda p: p.update(error={"code": "model_error"}),
 ])
 def test_inconsistent_success_is_never_published(mutate):
+    """拒绝标识、回答、阶段或最终报告彼此不一致的成功响应。"""
     payload = deepcopy(PAYLOAD)
     mutate(payload)
     with pytest.raises(APIClientError, match="invalid response") as caught:
@@ -59,6 +64,7 @@ def test_inconsistent_success_is_never_published(mutate):
 
 
 def test_final_quote_is_rechecked_against_submitted_original():
+    """客户端使用本次提交的原文再次验证最终报告引用。"""
     payload = deepcopy(PAYLOAD)
     report = {"summary": "s", "verdict": "needs_revision", "limitations": [], "findings": [{
         "category": "logic", "severity": "high", "message": "m", "suggestion": "s",
@@ -73,6 +79,7 @@ def test_final_quote_is_rechecked_against_submitted_original():
 
 @pytest.mark.parametrize("code", ["invalid_request", "duplicate_request", "capacity_exceeded", "internal_error", "service_unavailable"])
 def test_valid_rejection_is_parsed_without_exception(code):
+    """合法拒绝响应作为业务结果返回，无需抛出传输异常。"""
     status, message = ERROR_SPECS[code]
     body = {"request_id": None if code == "invalid_request" else "test-id", "review_id": None,
             "execution_mode": "fake", "status": "rejected", "responses": [], "stages": [],
@@ -85,6 +92,7 @@ def test_valid_rejection_is_parsed_without_exception(code):
 
 @pytest.mark.parametrize("status,body", [(200, PAYLOAD), (500, {"detail": "private-stack"}), (201, {}), (302, PAYLOAD)])
 def test_unexpected_status_or_shape_is_sanitized(status, body):
+    """未知状态码或非法响应结构转为通用客户端错误。"""
     with pytest.raises(APIClientError) as caught:
         invoke(httpx.Response(status, json=body, headers={"Location": "https://other.invalid"}))
     assert "private-stack" not in str(caught.value)
@@ -92,6 +100,7 @@ def test_unexpected_status_or_shape_is_sanitized(status, body):
 
 @pytest.mark.parametrize("exception", [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError])
 def test_network_failure_is_safe_and_never_retried(exception):
+    """网络失败不泄露异常细节，也不自动重试可能仍在执行的提交。"""
     calls = []
 
     def handle(request):
@@ -107,6 +116,7 @@ def test_network_failure_is_safe_and_never_retried(exception):
 
 
 def test_owned_http_client_closes_after_failure():
+    """便捷提交入口失败时也关闭自己创建的 HTTP 客户端。"""
     owned = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500, text="private")))
     with patch("review_system.api_client.httpx.Client", return_value=owned):
         with pytest.raises(APIClientError):
@@ -116,12 +126,14 @@ def test_owned_http_client_closes_after_failure():
 
 @pytest.mark.parametrize("url", ["", "ftp://localhost", "http://user:secret@localhost", "http://localhost?key=x", "http://localhost/#fragment", "http://localhost:bad", "http://localhost:99999"])
 def test_api_settings_reject_invalid_urls_without_echoing_them(url):
+    """非法后端地址提前报错，错误消息不回显地址。"""
     with pytest.raises(ValueError) as caught:
         APISettings(url)
     assert "secret" not in str(caught.value)
 
 
 def test_ui_wait_budget_is_larger_than_backend_budget_without_reading_model_key(monkeypatch):
+    """界面等待预算必须大于后端总预算，读取配置不依赖模型密钥。"""
     monkeypatch.delenv("REVIEW_API_BASE_URL", raising=False)
     monkeypatch.delenv("REVIEW_API_TIMEOUT_SECONDS", raising=False)
     monkeypatch.setenv("REVIEW_TOTAL_TIMEOUT_SECONDS", "200")

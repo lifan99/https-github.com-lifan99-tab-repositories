@@ -1,3 +1,5 @@
+"""Streamlit 页面回归：替换网络边界，验证展示、结果恢复及待确认请求标识。"""
+
 import asyncio
 import json
 import os
@@ -23,13 +25,15 @@ JUDGE_TEXT = json.dumps({
 
 
 def chat_response(content):
+    """将预置回答包装成兼容聊天接口的 HTTP 响应。"""
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
 
 @contextmanager
 def fake_provider(replies, *, mode="live"):
-    # UI makes an HTTP request. The mock transport forwards it through real API
-    # routes, service and workflow; only the provider boundary supplies fake data.
+    # 界面仍发送 HTTP 请求，由替身传输转入真实 API 路由、服务和工作流；
+    # 模型边界提供预置数据，整个测试不连接外部服务。
+    """替换界面 HTTP 传输和模型边界，保留真实 API、服务与工作流调用链。"""
     send = Mock(side_effect=replies)
     send.api_requests = []
     clients = []
@@ -64,7 +68,8 @@ def fake_provider(replies, *, mode="live"):
 
 
 def test_interrupted_review_preserves_current_results_across_reruns():
-    # Mock the environment loader and transport so no real .env or API is used.
+    # 替换环境加载与网络传输，避免读取真实 .env 或访问外部 API。
+    """审核中断时只保留本次部分结果，重跑页面不重复调用模型。"""
     env = {"REVIEW_PROVIDER": "qwen", "QWEN_API_KEY": "synthetic-placeholder"}
     replies = [chat_response(content) for content in ["Analysis", "Critique", JUDGE_TEXT, "New analysis"]]
     replies.append(httpx.RemoteProtocolError("synthetic-private-response"))
@@ -104,6 +109,7 @@ def test_interrupted_review_preserves_current_results_across_reruns():
 
 
 def test_callback_error_preserves_response_for_later_rerun():
+    """展示失败后已收到的回答仍保存在会话中，供页面重跑恢复。"""
     env = {"REVIEW_PROVIDER": "qwen", "QWEN_API_KEY": "synthetic-placeholder"}
     with patch.dict(os.environ, env, clear=True), patch("review_system.environment.load_project_env"), fake_provider([chat_response(item) for item in ["Analysis", "Critique", JUDGE_TEXT]]) as send:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run()
@@ -124,6 +130,7 @@ def test_callback_error_preserves_response_for_later_rerun():
 
 
 def test_bad_judge_quote_replaces_previous_report_and_survives_rerun():
+    """错误引用使本次报告失效，同时清除旧报告并保留非法原文。"""
     env = {"REVIEW_PROVIDER": "qwen", "QWEN_API_KEY": "synthetic-placeholder"}
     bad_report = json.dumps({
         "summary": "New report", "verdict": "needs_revision", "findings": [{
@@ -164,6 +171,7 @@ def test_bad_judge_quote_replaces_previous_report_and_survives_rerun():
 
 
 def test_structured_findings_and_limitations_are_visible():
+    """结构化问题、建议、原文引用及限制均展示在页面上。"""
     report = (Path(__file__).parent / "fixtures/d2/valid_report.json").read_text()
     env = {"REVIEW_PROVIDER": "qwen", "QWEN_API_KEY": "synthetic-placeholder"}
     with patch.dict(os.environ, env, clear=True), patch("review_system.environment.load_project_env"), fake_provider(
@@ -189,6 +197,7 @@ def test_structured_findings_and_limitations_are_visible():
 
 
 def test_fake_mode_visible_and_ui_needs_no_provider_key():
+    """离线结果有明确标识，界面运行无需模型供应商密钥。"""
     with patch.dict(os.environ, {}, clear=True), patch("review_system.environment.load_project_env"), fake_provider(
         [chat_response(item) for item in ["A", "C", JUDGE_TEXT]], mode="fake",
     ) as send:
@@ -207,6 +216,7 @@ def test_fake_mode_visible_and_ui_needs_no_provider_key():
 
 
 def test_uncertain_submission_reuses_id_until_confirmed_then_new_id():
+    """提交结果未确认时复用标识，确认后再次提交才生成新标识。"""
     captured = []
 
     def submit(**kwargs):
@@ -238,6 +248,7 @@ def test_uncertain_submission_reuses_id_until_confirmed_then_new_id():
 
 
 def test_changed_material_gets_new_id_after_uncertain_outcome():
+    """即使上次结果未确认，修改材料也会生成独立请求标识。"""
     with patch.dict(os.environ, {}, clear=True), patch("review_system.environment.load_project_env"), patch(
         "review_system.api_client.submit_review", side_effect=APIClientError("Unconfirmed"),
     ) as submit:
@@ -251,6 +262,7 @@ def test_changed_material_gets_new_id_after_uncertain_outcome():
 
 
 def test_invalid_local_input_or_configuration_does_not_send_http():
+    """本地输入或配置非法时在发 HTTP 请求前拒绝。"""
     with patch.dict(os.environ, {"REVIEW_API_TIMEOUT_SECONDS": "10"}, clear=True), patch("review_system.environment.load_project_env"), patch("review_system.api_client.submit_review") as submit:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run()
         app.text_area[0].set_value(" ")

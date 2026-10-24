@@ -23,3 +23,16 @@ dist/
 .DS_Store
 Thumbs.db
 ~$*.docx
+.ipynb_checkpoints/
+.vscode/
+
+# Personal skill drafts and accidental local reference placeholders.
+/skill-updates/
+/references/learning-profile.md
+/references/teaching-methods.md#adaptive-teaching
+
+# Private key and credential exports.
+*.pem
+*.key
+*.p12
+*.pfx

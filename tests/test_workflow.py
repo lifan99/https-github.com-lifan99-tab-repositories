@@ -1,3 +1,5 @@
+"""同步入口的工作流回归：覆盖角色顺序、上下文传递、回调及失败时的部分结果。"""
+
 import asyncio
 import json
 from unittest.mock import AsyncMock, Mock
@@ -17,6 +19,7 @@ JUDGE_TEXT = json.dumps({
 
 
 def test_order_context_prompts_and_final_response():
+    """验证角色顺序、独立提示词、前序上下文及最终回答。"""
     client = Mock(complete=AsyncMock())
     client.complete.side_effect = ["Analysis", "Critique", JUDGE_TEXT]
     callback = Mock()
@@ -44,6 +47,7 @@ def test_order_context_prompts_and_final_response():
 
 @pytest.mark.parametrize("user_input", ["", " \n\t"])
 def test_blank_input_makes_no_calls(user_input):
+    """空白输入直接失败，不调用模型。"""
     client = Mock(complete=AsyncMock())
     with pytest.raises(ValueError, match="Enter text"):
         run_review(user_input, client, **MODELS)
@@ -52,6 +56,7 @@ def test_blank_input_makes_no_calls(user_input):
 
 @pytest.mark.parametrize("length", [MAX_INPUT_CHARS - 1, MAX_INPUT_CHARS])
 def test_input_at_or_below_character_limit_is_preserved(length):
+    """上限以内的输入按原样传递，不截断或清理。"""
     client = Mock(complete=AsyncMock())
     client.complete.side_effect = ["Analysis", "Critique", JUDGE_TEXT]
     user_input = "测" * length
@@ -62,6 +67,7 @@ def test_input_at_or_below_character_limit_is_preserved(length):
 
 
 def test_oversized_input_makes_no_calls():
+    """超长输入在第一次模型调用前被拒绝。"""
     client = Mock(complete=AsyncMock())
     with pytest.raises(ValueError, match=f"at most {MAX_INPUT_CHARS:,} characters"):
         run_review("x" * (MAX_INPUT_CHARS + 1), client, **MODELS)
@@ -71,6 +77,7 @@ def test_oversized_input_makes_no_calls():
 @pytest.mark.parametrize("failed_index", [0, 1, 2])
 @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 def test_callback_failure_stops_calls_and_preserves_current_response(failed_index, error_type):
+    """回调失败后停止后续角色，但保留触发该回调的回答。"""
     client = Mock(complete=AsyncMock())
     client.complete.side_effect = ["Analysis", "Critique", JUDGE_TEXT]
     error = error_type("synthetic-private-detail")
@@ -92,6 +99,7 @@ def test_callback_failure_stops_calls_and_preserves_current_response(failed_inde
 
 
 def test_callback_cancellation_propagates():
+    """回调触发的任务取消继续向调用方传播。"""
     client = Mock(complete=AsyncMock())
     client.complete.return_value = "Analysis"
     callback = Mock(side_effect=KeyboardInterrupt())
@@ -102,6 +110,7 @@ def test_callback_cancellation_propagates():
 
 @pytest.mark.parametrize("failed_index", [0, 1, 2])
 def test_failure_stops_workflow_and_preserves_completed_outputs(failed_index):
+    """任一阶段失败后不继续执行，已完成回答保持可读。"""
     client = Mock(complete=AsyncMock())
     client.complete.side_effect = ["Completed"] * failed_index + [LLMError("Provider request timed out.")]
     with pytest.raises(WorkflowError) as caught:
@@ -120,6 +129,7 @@ def test_failure_stops_workflow_and_preserves_completed_outputs(failed_index):
 
 @pytest.mark.parametrize("response", ["", "   ", None])
 def test_invalid_model_output_stops_workflow(response):
+    """非文本或空白回答按模型错误停止流程。"""
     client = Mock(complete=AsyncMock())
     client.complete.return_value = response
     with pytest.raises(WorkflowError, match="empty or non-text"):
@@ -130,6 +140,7 @@ def test_invalid_model_output_stops_workflow(response):
 @pytest.mark.parametrize("failed_index", [0, 1, 2])
 @pytest.mark.parametrize("error_type", [httpx.ReadError, httpx.RemoteProtocolError])
 def test_http_protocol_failure_preserves_completed_outputs(failed_index, error_type):
+    """HTTP 协议中断不丢失此前角色已经完成的回答。"""
     settings = Settings("qwen", "https://example.invalid/v1", "test-placeholder", "m", "m", "m", "m")
     responses = [
         httpx.Response(200, json={"choices": [{"message": {"content": f"Completed {index}"}}]})
@@ -158,6 +169,7 @@ def test_http_protocol_failure_preserves_completed_outputs(failed_index, error_t
 
 @pytest.mark.parametrize("value", [None, 1, True, [], {}])
 def test_non_string_input_makes_no_calls(value):
+    """原文不是字符串时不调用模型。"""
     client = Mock(complete=AsyncMock())
     with pytest.raises(ValueError, match="original_input"):
         run_review(value, client, **MODELS)
@@ -166,6 +178,7 @@ def test_non_string_input_makes_no_calls(value):
 
 @pytest.mark.parametrize("mode", ["bad", None, [], True])
 def test_invalid_mode_makes_no_calls(mode):
+    """非法审核模式在调用模型前被拒绝。"""
     client = Mock(complete=AsyncMock())
     with pytest.raises(ValueError, match="review_mode"):
         run_review("Input", client, review_mode=mode, **MODELS)
@@ -174,6 +187,7 @@ def test_invalid_mode_makes_no_calls(mode):
 
 @pytest.mark.parametrize("mode", ["logic", "evidence"])
 def test_mode_and_unmodified_original_reach_every_stage(mode):
+    """审核模式及未经改写的原文到达所有角色。"""
     client = Mock(complete=AsyncMock())
     client.complete.side_effect = ["Analysis", "Critique", JUDGE_TEXT]
     original = " \n中文🐍\n重复 重复 "
@@ -197,6 +211,7 @@ def test_mode_and_unmodified_original_reach_every_stage(mode):
     }], "limitations": []}),
 ])
 def test_judge_contract_failure_retains_raw_output_but_does_not_publish(text):
+    """Judge 契约失败时保存原始输出，但不发布结构化最终报告。"""
     client = Mock(complete=AsyncMock())
     client.complete.side_effect = ["Analysis", "Critique", text]
     callback = Mock()
@@ -214,6 +229,7 @@ def test_judge_contract_failure_retains_raw_output_but_does_not_publish(text):
 
 
 def test_separate_reviews_do_not_share_state():
+    """多次审核的上下文、回答和执行快照互不共享。"""
     first = Mock(complete=AsyncMock())
     first.complete.side_effect = ["A", "C", JUDGE_TEXT]
     result = run_review("First", first, **MODELS)

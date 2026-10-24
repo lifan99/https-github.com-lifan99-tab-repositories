@@ -1,4 +1,4 @@
-"""Small allowlisted JSON event stream; never log prompts, outputs or exceptions."""
+"""只输出允许字段组成的 JSON 事件；不记录提示词、模型正文或异常详情。"""
 
 import json
 import logging
@@ -15,7 +15,7 @@ _STATUSES = {"running", "succeeded", "failed", "cancelled", "skipped", "rejected
 
 
 def configure_logging():
-    """Configure only this package's event logger, once per process."""
+    """每个进程只安装一次本包事件日志处理器，不改动全局根日志器。"""
     if not any(getattr(handler, "_review_events", False) for handler in LOGGER.handlers):
         handler = logging.StreamHandler()
         handler._review_events = True
@@ -26,8 +26,9 @@ def configure_logging():
 
 
 def log_event(*, review_id, stage=None, status, elapsed_ms=0, error_code=None):
-    # These values originate in control flow. Sanitize unexpected injected client
-    # codes too, so they cannot become an accidental channel for provider text.
+    # 即使值来自内部流程，也校验注入客户端返回的异常错误码，
+    # 避免供应商文本通过错误码等字段意外进入日志。
+    """清洗标识、状态、错误码和耗时后记录事件；日志写入失败不影响审核结果。"""
     try:
         review_id = str(UUID(review_id)) if review_id is not None else None
     except (ValueError, TypeError, AttributeError):
@@ -51,5 +52,5 @@ def log_event(*, review_id, stage=None, status, elapsed_ms=0, error_code=None):
     try:
         LOGGER.info(json.dumps(event, ensure_ascii=False, allow_nan=False))
     except Exception:
-        # A broken log sink must not turn a completed review into a model failure.
+        # 日志输出故障不能把已完成的审核变成模型调用失败。
         return

@@ -1,5 +1,7 @@
 # 多 Agent 审核系统
 
+本文是本项目的工程运行说明。项目配套学习保存在仓库的 study/，通用基础课位于工作区 learning/；目录边界见 [迁移说明](docs/目录迁移.md)。
+
 一个基于 Python 3.12 和 Streamlit 的本地审核 MVP，用 Analyst、Critic、Judge 三个角色依次审核文本、代码、推理或技术方案，并展示每个阶段的回答。
 
 ```text
@@ -21,7 +23,7 @@
 
 **2026-10-16：D2—D4 已接入，D5 UI 已改为调用后端，D6 本地自动检查与日志已接入，339 项默认测试通过。** 多份审核在同一事件循环中共享客户端与名额时可以并发，单份审核仍按角色顺序执行。异步内核的总预算包含排队；HTTP 服务满载立即拒绝。取消保留已完成结果并释放名额。Streamlit 经 HTTP 调用后端并等待审核结束，尚无停止按钮；同一服务实例为页面请求统一管理容量。
 
-本轮使用离线替身，真实模型连通性与审核质量未验证。两种模式都只评估输入材料，不会联网核验。FastAPI 服务已支持统一准入和错误映射；尚无数据库或跨重启历史恢复。完整状态见 [实施总览](docs/implementation-status.md)；最新证据见 [D7 实施记录](docs/day-07-evidence.md)、[D6 实施记录](docs/day-06-evidence.md)、[D5 实施记录](docs/day-05-evidence.md)、[D4 实施记录](docs/day-04-evidence.md)、[D3 实施记录](docs/day-03-evidence.md)，前序记录见 [D2](docs/day-02-evidence.md) 与 [D1](docs/week-01-evidence.md)。
+本轮使用离线替身，真实模型连通性与审核质量未验证。两种模式都只评估输入材料，不会联网核验。FastAPI 服务已支持统一准入和错误映射；尚无数据库或跨重启历史恢复。完整状态见 [实施总览](docs/technical/工程状态.md)；最新证据见 [D7 实施记录](docs/archive/engineering/day-07-evidence.md)、[D6 实施记录](docs/archive/engineering/day-06-evidence.md)、[D5 实施记录](docs/archive/engineering/day-05-evidence.md)、[D4 实施记录](docs/archive/engineering/day-04-evidence.md)、[D3 实施记录](docs/archive/engineering/day-03-evidence.md)，前序记录见 [D2](docs/archive/engineering/day-02-evidence.md) 与 [D1](docs/archive/engineering/week-01-evidence.md)。
 
 ## 快速开始
 
@@ -33,15 +35,15 @@ python3.12 -m venv .venv
 .venv/bin/python scripts/check.py
 ```
 
-该精确版本清单已在 Linux x86_64 / Python 3.12 的干净环境复验，其他平台未做同等验证。统一检查包含 Ruff、本地文档链接、默认 pytest、课堂回归、HTTP 练习参考实现和依赖一致性检查。CI 使用同一入口，随后运行本机 fake HTTP/UI 演示；远程 CI 尚未执行。依赖安装需要访问包源；测试执行本身不调用外部模型。Windows PowerShell 的环境命令见 [入门教程](docs/从零手撕多智能体审查项目.md#s04)。
+该精确版本清单已在 Linux x86_64 / Python 3.12 的干净环境复验，其他平台未做同等验证。统一检查包含 Ruff、本地文档链接、默认 pytest、课堂回归、HTTP 练习参考实现和依赖一致性检查。CI 使用同一入口，随后运行本机 fake HTTP/UI 演示；远程 CI 尚未执行。依赖安装需要访问包源；测试执行本身不调用外部模型。Windows PowerShell 的环境命令见 [入门教程](docs/technical/源码详解.md#s04)。
 
 ### 不使用模型凭据的流程演示
 
 项目附带两个使用预置 fake 回答的教学脚本，可观察上下文传递与失败停止：
 
 ```bash
-.venv/bin/python docs/two-hour-course/examples/E05_project_trace.py
-.venv/bin/python docs/two-hour-course/examples/E06_project_failure.py
+.venv/bin/python examples/core/E05_project_trace.py
+.venv/bin/python examples/core/E06_project_failure.py
 ```
 
 第一个输出 Analyst、Critic、Judge 的预置回答和上下文键；第二个模拟 Critic 失败，保留 Analyst 并停止 Judge。这些输出用于验证程序行为，不代表真实模型审核结果。Streamlit 本身无需模型凭据；连接显式 fake API 即可体验页面。
@@ -49,8 +51,8 @@ python3.12 -m venv .venv
 D2 的结构化报告成功与错误引用演示：
 
 ```bash
-PYTHONPATH=. .venv/bin/python docs/day-02/examples/E01_contract_review.py
-PYTHONPATH=. .venv/bin/python docs/day-02/examples/E01_contract_review.py --invalid-quote
+PYTHONPATH=. .venv/bin/python examples/contracts/E01_contract_review.py
+PYTHONPATH=. .venv/bin/python examples/contracts/E01_contract_review.py --invalid-quote
 ```
 
 ### 启动本地 HTTP 服务（D4）
@@ -77,7 +79,7 @@ curl -s http://127.0.0.1:8000/api/v1/reviews \
 真实本机 HTTP 的离线验收脚本（自动启动临时端口并关闭）：
 
 ```bash
-PYTHONPATH=. .venv/bin/python docs/day-04/examples/E03_local_http_smoke.py
+PYTHONPATH=. .venv/bin/python examples/api/E03_local_http_smoke.py
 ```
 
 ### 配置后端并启动 UI
@@ -85,10 +87,10 @@ PYTHONPATH=. .venv/bin/python docs/day-04/examples/E03_local_http_smoke.py
 仅在使用 live 后端时需要模型凭据。复制 [配置模板](.env.example)，在本机 `.env` 中填写所选供应商的 API Key：
 
 ```bash
-cp .env.example .env
+cp -n .env.example .env
 ```
 
-应用启动时只加载项目根目录的 `.env`；已有环境变量优先，包括值为空的变量。切换供应商时设置 `REVIEW_PROVIDER` 并填写对应的 Key。
+`cp -n` 遇到已有 `.env` 时跳过复制，直接在本机编辑已有文件。应用启动时只加载项目根目录的 `.env`；已有环境变量优先，包括值为空的变量。切换供应商时设置 `REVIEW_PROVIDER` 并填写对应的 Key。
 
 | 配置 | 用途 |
 | --- | --- |
@@ -136,7 +138,9 @@ REVIEW_API_BASE_URL=http://127.0.0.1:8000 .venv/bin/python -m streamlit run app.
 ├── scripts/check.py         # 本地与 CI 共用离线检查
 ├── .github/workflows/       # 自动回归配置
 ├── tests/                   # 默认离线回归测试
-├── docs/                    # 基线证据、学习资料与固定样例
+├── docs/                    # 项目说明、技术文档与工程证据
+├── examples/                # 本项目的教学与验证示例
+├── study/                   # 项目学习路线、任务、作答与定制教程
 ├── AGENTS.md                # 工程约束
 ├── requirements-py312-linux.txt # 已验证的依赖版本快照
 ├── pyproject.toml           # Python 依赖与测试配置
@@ -152,27 +156,17 @@ REVIEW_API_BASE_URL=http://127.0.0.1:8000 .venv/bin/python -m streamlit run app.
 D3 的实际业务内核离线演示（并发、总期限、取消及取消后复用）：
 
 ```bash
-PYTHONPATH=. .venv/bin/python docs/day-03/examples/E04_integrated_reviews.py
+PYTHONPATH=. .venv/bin/python examples/async/E04_integrated_reviews.py
 ```
 
 ## 文档与学习入口
 
-- [文档索引](docs/README.md)：按运行、核验和学习用途选择材料。
-- [代码与指令参考指南](docs/代码与指令参考指南.md)：常用命令、isinstance 等 Python 代码用法、接口、测试与排错速查。
-- [首日阅读材料](docs/第一日阅读材料.md)：90 分钟学习调用链、上下文与失败处理，附离线练习和参考答案。
-- [第二日计划任务](docs/第二日计划任务.md)与[配套阅读材料](docs/第二日阅读材料.md)：请求与报告契约、引用校验、阶段状态及实施验收。
-- [第三日计划任务](docs/第三日计划任务.md)与[配套阅读材料](docs/第三日阅读材料.md)：异步请求、并发隔离、超时与取消，附 3 个概念示例及业务内核集成演示。
-- [第四日计划任务](docs/第四日计划任务.md)与[配套阅读材料](docs/第四日阅读材料.md)：FastAPI 服务、HTTP 契约、容量与重复请求处理，附 2 个离线教学示例。
-- [从零手撕多智能体审查项目](docs/从零手撕多智能体审查项目.md)：环境、源码、测试和排错入门。
-- [两小时源码精读讲义](docs/two-hour-course/完整讲义.md)：结合独立例子理解架构与 Python。
-- [可编辑 Word 讲义](docs/Multi-Agent_MVP_软件架构与Python源码精读_两小时课程.docx)：保留 2026-10-12 原长版；最新阅读修订见 Markdown 讲义。
-- [D1 基线记录](docs/week-01-evidence.md)：真实测试结果、调用链、fake 观察和后续工程状态。
-- [固定审核输入](docs/samples/d1-logic-proposal.txt)：供后续回归与演示复用。
+[项目文档导航](docs/README.md)汇总源码、接口与工程证据；[项目学习入口](study/README.md)组织阶段路线、[今天的任务与完成记录](study/今天.md)、作业与本人作答；[示例索引](examples/README.md)用于离线演示。
 
-课程中的测试结果和源码节选属于其标注版本；再次验证时以当前源码和实际终端输出为准。默认 pytest 只运行 `tests/`，课程练习需要显式指定文件。
+整个工作区从 `~/ai-engineering/README.md` 进入，通用基础课在 `~/ai-engineering/learning/`。普通项目检查包含 `study/` 的本地链接，不依赖仓库外的基础课程。运行 `.venv/bin/python scripts/check.py --include-personal` 可一并检查工作区导航、基础课程、求职与独立资料，以及三道已有 Python 练习。
 
 ## 版本管理
 
 源码、测试、文档和 `.env.example` 纳入 Git；`.env` 及其变体、虚拟环境、缓存、临时目录和构建产物由 `.gitignore` 排除。API Key 从环境读取，配置对象的常规表示及显示的供应商错误省略凭据。
 
-D1 历史核心代码基线为 `334e350`。当前交付包含 D2—D7 的异步工作流、本地 API、HTTP UI、离线回归和配套学习材料，统一检查命令为 `.venv/bin/python scripts/check.py`。真实模型联调、远程 CI 与复现验收的实际状态见[实施总览](docs/implementation-status.md)；历史日记录保留当时的验证范围。
+D1 历史核心代码基线为 `334e350`。当前交付包含 D2—D7 的异步工作流、本地 API、HTTP UI、离线回归和配套学习材料，统一检查命令为 `.venv/bin/python scripts/check.py`。真实模型联调、远程 CI 与复现验收的实际状态见[实施总览](docs/technical/工程状态.md)；历史日记录保留当时的验证范围。

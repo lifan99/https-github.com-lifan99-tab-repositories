@@ -1,4 +1,7 @@
-"""Run with: streamlit run app.py."""
+"""Streamlit 页面入口；通过 HTTP 提交审核，在会话中保存结果以支持页面重跑。
+
+启动方式：streamlit run app.py。
+"""
 
 from uuid import uuid4
 
@@ -27,12 +30,14 @@ user_input = st.text_area(
 
 
 def display_response(response) -> None:
+    """显示单个角色回答及所用模型；原始回答与下方结构化报告分别展示。"""
     st.subheader(response.agent)
     st.caption(f"Model: {response.model}")
     st.markdown(response.content)
 
 
 def display_record(record) -> None:
+    """展示阶段快照和已验证报告；格式非法的 Judge 原文单独标记，不作为最终报告。"""
     st.subheader("Stage status")
     st.caption(f"Review mode: {st.session_state.get('completed_review_mode', 'logic')}")
     st.table([
@@ -62,29 +67,36 @@ def display_record(record) -> None:
             st.text(limitation)
 
 
+# Streamlit 交互会从头执行脚本；只有点击按钮才发起请求，历史结果从会话状态恢复。
 if st.button("Review", type="primary"):
+    # 新提交先清除上次展示结果，避免本次失败时仍显示旧报告。
     for key in ("review_result", "review_error", "review_record", "render_error"):
         st.session_state.pop(key, None)
     try:
         validate_review_request(user_input, review_mode)
         settings = APISettings.from_env()
+        # 同一材料的提交结果未确认时复用 request_id；材料或模式变化才生成新标识。
+        # 服务只在执行期间去重，复用标识并不保证完成后重提不会再次调用模型。
         pending = st.session_state.get("pending_submission")
         if pending is None or pending["original_input"] != user_input or pending["review_mode"] != review_mode:
             pending = {"request_id": str(uuid4()), "original_input": user_input, "review_mode": review_mode}
             st.session_state.pending_submission = pending
         with st.spinner("Reviewing… Results appear when the service finishes."):
             result = submit_review(**pending, settings=settings)
+        # 先保存完整响应再展示；即使渲染失败，页面重跑仍能恢复已收到的结果。
         st.session_state.review_result = result.responses
         st.session_state.review_record = result
         st.session_state.completed_review_mode = review_mode
         if isinstance(result, FailureResponse):
             stage = f"{result.error.stage}: " if result.error.stage else ""
             st.session_state.review_error = f"{stage}{result.error.message} ({result.error.code})"
+        # 执行中重复请求仍保留待确认标识；其他可信响应表示本次提交已有明确结果。
         if not isinstance(result, FailureResponse) or result.error.code != "duplicate_request":
             st.session_state.pop("pending_submission", None)
     except (APIClientError, ValueError) as exc:
         st.session_state.review_error = str(exc)
 
+# 展示只读取会话快照，不在重跑时重复提交审核。
 if record := st.session_state.get("review_record"):
     if record.execution_mode == "fake":
         st.warning("FAKE / Offline demonstration — these results do not assess your material.")
